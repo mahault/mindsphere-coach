@@ -420,15 +420,19 @@ class UserProfile:
         turn: int,
         classifier=None,
         context: str = "",
-    ) -> List[ProfileFact]:
+    ) -> Dict[str, Any]:
         """
         Extract facts from user text, store them, and update the Bayesian network.
 
         LLM extraction is primary — it catches ANY meaningful personal information
         and infers causal connections. Heuristics are fallback only.
+
+        Returns:
+            {"facts": [ProfileFact, ...], "progress_signals": [...]}
         """
         new_facts = []
         causal_links = []
+        progress_signals = []
 
         # PRIMARY: LLM extraction (flexible, catches anything)
         if classifier is not None:
@@ -437,6 +441,7 @@ class UserProfile:
                 if llm_result:
                     new_facts.extend(llm_result["facts"])
                     causal_links.extend(llm_result.get("causal_links", []))
+                    progress_signals.extend(llm_result.get("progress_signals", []))
             except Exception as e:
                 logger.debug(f"LLM profile extraction failed: {e}")
 
@@ -446,6 +451,10 @@ class UserProfile:
             for hf in heuristic_facts:
                 if not self._is_duplicate(hf, new_facts):
                     new_facts.append(hf)
+
+        # FALLBACK: Heuristic progress detection (when LLM unavailable)
+        if not progress_signals:
+            progress_signals = self._detect_progress_heuristic(user_text)
 
         # Deduplicate against existing profile
         truly_new = []
@@ -467,7 +476,16 @@ class UserProfile:
                     + ", ".join(f"'{l['from']}' → '{l['to']}'" for l in causal_links)
                 )
 
-        return truly_new
+        if progress_signals:
+            logger.info(
+                f"[Profile] {len(progress_signals)} progress signals: "
+                + ", ".join(
+                    f"{s['skill']} {s['direction']} ({s['magnitude']:.2f})"
+                    for s in progress_signals
+                )
+            )
+
+        return {"facts": truly_new, "progress_signals": progress_signals}
 
     def _extract_via_llm(
         self,
@@ -489,7 +507,7 @@ class UserProfile:
             existing_summary = f"\nAlready known about this person: {'; '.join(existing_items)}"
 
         prompt = (
-            "Analyze this message for personal information. Extract TWO things:\n\n"
+            "Analyze this message for personal information. Extract THREE things:\n\n"
             "1. FACTS: Any meaningful personal information — life events, emotions, "
             "goals, challenges, relationships, work, health, interests, decisions, "
             "realizations, or context about their life. Be flexible — extract "
@@ -498,6 +516,13 @@ class UserProfile:
             "or to existing facts? What does this fact likely CAUSE or AFFECT?\n"
             "For example: 'breakup' → 'emotional_stress' (strength 0.8)\n"
             "             'emotional_stress' → 'focus_impaired' (strength 0.6)\n\n"
+            "3. PROGRESS SIGNALS: Does the user report improvement or regression "
+            "in any skill area? Look for statements like:\n"
+            "  - 'I've been focusing better' → focus: +0.3\n"
+            "  - 'I keep procrastinating' → follow_through: -0.2\n"
+            "  - 'I stood up for myself today' → social_courage: +0.4\n"
+            "  - 'I can't stop worrying' → emotional_reg: -0.3\n"
+            "Only include when the user clearly reports a change in their behavior.\n\n"
             f"{existing_summary}\n"
             f"Message: \"{user_text}\"\n\n"
             "Return JSON with this exact structure:\n"
@@ -512,6 +537,12 @@ class UserProfile:
             '    {"from": "fact content or existing fact", "to": "inferred state or effect", '
             '"strength": 0.0-1.0, "relationship": "increases|decreases|triggers|blocks", '
             '"to_valence": "positive|negative|neutral"}\n'
+            "  ],\n"
+            '  "progress_signals": [\n'
+            '    {"skill": "focus|follow_through|social_courage|emotional_reg|'
+            'systems_thinking|self_trust|task_clarity|consistency", '
+            '"direction": "improvement|regression", "magnitude": 0.1-0.5, '
+            '"evidence": "what the user said"}\n'
             "  ]\n"
             "}\n\n"
             "Rules:\n"
@@ -520,6 +551,7 @@ class UserProfile:
             "emotional_reg, systems_thinking, self_trust, task_clarity, consistency\n"
             "- Causal links can point to latent states the user didn't explicitly say "
             "(like 'emotional_stress' inferred from 'breakup')\n"
+            "- progress_signals: only when user reports actual behavioral change\n"
             "- Return empty arrays if the message has no significant personal content\n"
             "- Keep fact content concise (under 100 chars)"
         )
@@ -575,7 +607,22 @@ class UserProfile:
                         "to_valence": link.get("to_valence", "neutral"),
                     })
 
-            return {"facts": facts, "causal_links": causal_links}
+            # Parse progress signals
+            progress_signals = []
+            for sig in data.get("progress_signals", []):
+                if isinstance(sig, dict) and sig.get("skill") and sig.get("direction"):
+                    progress_signals.append({
+                        "skill": sig["skill"],
+                        "direction": sig["direction"],
+                        "magnitude": float(sig.get("magnitude", 0.2)),
+                        "evidence": sig.get("evidence", ""),
+                    })
+
+            return {
+                "facts": facts,
+                "causal_links": causal_links,
+                "progress_signals": progress_signals,
+            }
 
         except Exception as e:
             logger.debug(f"LLM profile extraction parse error: {e}")
@@ -857,6 +904,82 @@ class UserProfile:
                 break
 
         return facts
+
+    def _detect_progress_heuristic(self, user_text: str) -> List[Dict[str, Any]]:
+        """Fallback: detect progress/regression signals from keywords."""
+        signals = []
+        lower = user_text.lower()
+
+        # Improvement patterns: (pattern, skill, magnitude)
+        improvement_patterns = [
+            ("been focusing better", "focus", 0.25),
+            ("able to concentrate", "focus", 0.2),
+            ("stayed focused", "focus", 0.3),
+            ("finally finished", "follow_through", 0.3),
+            ("actually completed", "follow_through", 0.25),
+            ("followed through", "follow_through", 0.3),
+            ("stuck with it", "follow_through", 0.25),
+            ("spoke up", "social_courage", 0.3),
+            ("stood up for myself", "social_courage", 0.35),
+            ("told them how i feel", "social_courage", 0.3),
+            ("set a boundary", "social_courage", 0.3),
+            ("calmed myself down", "emotional_reg", 0.25),
+            ("handled it well", "emotional_reg", 0.2),
+            ("didn't overreact", "emotional_reg", 0.2),
+            ("feeling more confident", "self_trust", 0.25),
+            ("trusted my gut", "self_trust", 0.3),
+            ("believed in myself", "self_trust", 0.25),
+            ("figured out the root cause", "systems_thinking", 0.25),
+            ("see the bigger picture", "systems_thinking", 0.2),
+            ("knew exactly what to do", "task_clarity", 0.25),
+            ("had a clear plan", "task_clarity", 0.2),
+            ("been consistent", "consistency", 0.3),
+            ("kept my routine", "consistency", 0.25),
+            ("every day this week", "consistency", 0.3),
+        ]
+
+        # Regression patterns
+        regression_patterns = [
+            ("can't focus", "focus", 0.2),
+            ("keep getting distracted", "focus", 0.2),
+            ("couldn't concentrate", "focus", 0.2),
+            ("gave up", "follow_through", 0.25),
+            ("didn't finish", "follow_through", 0.2),
+            ("keep procrastinating", "follow_through", 0.25),
+            ("quit again", "follow_through", 0.3),
+            ("couldn't speak up", "social_courage", 0.2),
+            ("stayed quiet", "social_courage", 0.15),
+            ("too scared to", "social_courage", 0.2),
+            ("lost my temper", "emotional_reg", 0.25),
+            ("broke down", "emotional_reg", 0.2),
+            ("can't stop worrying", "emotional_reg", 0.2),
+            ("don't trust myself", "self_trust", 0.25),
+            ("second-guessing", "self_trust", 0.2),
+            ("no idea where to start", "task_clarity", 0.2),
+            ("broke my streak", "consistency", 0.25),
+            ("fell off the wagon", "consistency", 0.3),
+            ("skipped it again", "consistency", 0.2),
+        ]
+
+        for pattern, skill, magnitude in improvement_patterns:
+            if pattern in lower:
+                signals.append({
+                    "skill": skill,
+                    "direction": "improvement",
+                    "magnitude": magnitude,
+                    "evidence": pattern,
+                })
+
+        for pattern, skill, magnitude in regression_patterns:
+            if pattern in lower:
+                signals.append({
+                    "skill": skill,
+                    "direction": "regression",
+                    "magnitude": magnitude,
+                    "evidence": pattern,
+                })
+
+        return signals
 
     def _is_duplicate(self, new_fact: ProfileFact, existing: List[ProfileFact]) -> bool:
         """Check if a fact is a duplicate of an existing one."""

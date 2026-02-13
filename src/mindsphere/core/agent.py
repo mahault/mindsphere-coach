@@ -27,6 +27,7 @@ from .inference import (
     select_action,
     compute_information_gain,
 )
+from .action_dispatcher import select_coaching_action
 from .dependency_graph import DependencyGraph
 from .utils import normalize, softmax
 from ..tom.particle_filter import UserTypeFilter
@@ -956,46 +957,55 @@ class CoachingAgent:
             "emotional_inference": emotional_data,
         })
 
-        # Detect if user is ready for coaching or wants to chat
+        # === Keyword overrides: explicit coaching request always honored ===
         lower = user_text.lower()
         wants_coaching = any(w in lower for w in [
             "suggest", "what should", "help me", "what can i do",
             "let's work", "what next", "show me", "i want to improve",
             "what do you recommend", "first step",
         ])
-        is_off_topic = cog_load.get("coaching_readiness") == "not_ready" or \
-            "off_topic" in cog_load.get("signals", [])
 
         # Try LLM first — it handles off-topic naturally
-        # NOTE: user message is tracked AFTER LLM call to avoid duplicate
-        # user messages in the conversation history (gen.generate adds it too)
         llm_response = self._llm_generate(user_text)
         self._track_conversation("user", user_text)
         response = llm_response or self._respond_to_sphere_reaction(user_text)
 
-        # Only transition to planning when user signals readiness,
-        # NOT based on turn count
         if wants_coaching:
             result = self._transition_to_planning_with_bridge(response)
+            result["efe_info"] = {"selected_action": "propose_intervention", "override": "explicit_request"}
             self._track_conversation("assistant", result["message"])
             return result
 
-        # If user is off-topic or chatting, stay in visualization and converse
-        # After enough engaged turns, gently offer coaching (but don't force it)
-        if self._viz_turns >= 4 and not is_off_topic:
-            # Gently offer coaching as an option, not a forced transition
-            if not llm_response:
-                response += (
-                    "\n\nWhenever you're ready, I can suggest something concrete to work on. "
-                    "No rush though."
-                )
+        # === EFE-driven action selection ===
+        action_idx, action_name, efe_info = select_coaching_action(
+            beliefs=self.beliefs,
+            model=self.model,
+            phase="visualization",
+            timestep=self.timestep,
+            tom_reliability=self.tom.reliability,
+            empathy_planner=self.empathy,
+            tom_filter=self.tom,
+            target_skill=self.target_skill,
+            current_intervention=self.current_intervention,
+        )
 
+        # Only transition when EFE strongly favors it AND we've had some discussion
+        propose_prob = efe_info["action_probabilities"].get("propose_intervention", 0)
+        if action_name == "propose_intervention" and propose_prob > 0.45 and self._viz_turns >= 2:
+            # EFE confidently says transition to planning
+            result = self._transition_to_planning_with_bridge(response)
+            result["efe_info"] = efe_info
+            self._track_conversation("assistant", result["message"])
+            return result
+
+        # ask_free_text or show_sphere (or propose_intervention below threshold): stay in visualization
         self._track_conversation("assistant", response)
         return {
             "phase": PHASE_VISUALIZATION,
             "message": response,
             "sphere_data": self.get_sphere_data(),
             "belief_summary": self.get_belief_summary(),
+            "efe_info": efe_info,
             "is_complete": False,
         }
 
@@ -1012,15 +1022,39 @@ class CoachingAgent:
         return planning_result
 
     def _transition_to_planning(self) -> Dict[str, Any]:
-        """Transition to planning: propose first intervention."""
+        """Transition to planning: propose first intervention using EFE to select skill."""
         self.phase = PHASE_PLANNING
         self._planning_turns = 0
 
-        # Find the highest-impact skill to target
+        # Use EFE to select the best skill to target from top candidates
         impact_ranking = self.dep_graph.compute_impact_ranking(
             {k: v for k, v in self.beliefs.items() if k in SKILL_FACTORS}
         )
-        self.target_skill = impact_ranking[0][0] if impact_ranking else SKILL_FACTORS[0]
+        top_skills = [s for s, _ in impact_ranking[:3]] if impact_ranking else SKILL_FACTORS[:1]
+
+        # Evaluate EFE of propose_intervention targeting each candidate skill
+        best_skill = top_skills[0]
+        best_G = float("inf")
+        for skill in top_skills:
+            G = compute_efe_all_factors(
+                self.beliefs, self.model, 3,  # action = propose_intervention
+                relevant_factors=[skill],
+                lambda_epist=0.5,
+            )
+            # Blend with empathy: predict felt cost for gentle intervention
+            gentle_list = get_interventions_for_skill(skill, "gentle")
+            if gentle_list:
+                pred = self.tom.predict_response_gated(gentle_list[0].to_dict())
+                G_social = self.empathy.compute_blended_efe(
+                    G, pred["predicted_felt_cost"], self.tom.reliability
+                )
+            else:
+                G_social = G
+            if G_social < best_G:
+                best_G = G_social
+                best_skill = skill
+
+        self.target_skill = best_skill
 
         # Get gentle/push pair for counterfactual
         gentle, push = get_gentle_push_pair(self.target_skill)
@@ -1158,27 +1192,47 @@ class CoachingAgent:
     def _propose_alternative(
         self, rejection_reason: str, tom_stats: Dict
     ) -> Dict[str, Any]:
-        """Propose an adjusted intervention after rejection."""
+        """Propose an adjusted intervention after rejection, using EFE+ToM to select."""
         if self.target_skill is None:
             self.target_skill = SKILL_FACTORS[0]
 
-        # If "too hard", go gentler; if "not relevant", try different skill
-        if rejection_reason == "too_hard":
-            interventions = get_interventions_for_skill(self.target_skill, "gentle")
-            if interventions:
-                self.current_intervention = interventions[0]
-        elif rejection_reason == "not_relevant":
-            # Try next skill in impact ranking
-            impact_ranking = self.dep_graph.compute_impact_ranking(
-                {k: v for k, v in self.beliefs.items() if k in SKILL_FACTORS}
-            )
-            for skill, _ in impact_ranking:
-                if skill != self.target_skill:
-                    self.target_skill = skill
-                    gentle_list = get_interventions_for_skill(skill, "gentle")
-                    if gentle_list:
-                        self.current_intervention = gentle_list[0]
-                    break
+        # Use EFE to find the best alternative across candidate (skill, intervention) pairs
+        impact_ranking = self.dep_graph.compute_impact_ranking(
+            {k: v for k, v in self.beliefs.items() if k in SKILL_FACTORS}
+        )
+
+        candidates = []
+        for skill, _ in (impact_ranking[:4] if impact_ranking else [(SKILL_FACTORS[0], 0)]):
+            # For "too_hard", always use gentle; for "not_relevant", try different skills
+            if rejection_reason == "too_hard" and skill == self.target_skill:
+                ivs = get_interventions_for_skill(skill, "gentle")
+            elif rejection_reason == "not_relevant" and skill == self.target_skill:
+                continue  # skip the rejected skill
+            else:
+                ivs = get_interventions_for_skill(skill, "gentle")
+
+            for iv in ivs[:2]:  # consider up to 2 interventions per skill
+                G = compute_efe_all_factors(
+                    self.beliefs, self.model, 3,
+                    relevant_factors=[skill], lambda_epist=0.5,
+                )
+                pred = self.tom.predict_response_gated(iv.to_dict())
+                G_social = self.empathy.compute_blended_efe(
+                    G, pred["predicted_felt_cost"], self.tom.reliability
+                )
+                candidates.append((skill, iv, G_social))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[2])
+            best_skill, best_iv, _ = candidates[0]
+            self.target_skill = best_skill
+            self.current_intervention = best_iv
+        else:
+            # Fallback: original hardcoded logic
+            if rejection_reason == "too_hard":
+                ivs = get_interventions_for_skill(self.target_skill, "gentle")
+                if ivs:
+                    self.current_intervention = ivs[0]
 
         # Compute new counterfactual
         gentle, push = get_gentle_push_pair(self.target_skill)
@@ -1237,13 +1291,12 @@ class CoachingAgent:
         return result
 
     def _step_coaching(self, user_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Handle the ongoing coaching conversation."""
+        """Handle the ongoing coaching conversation using EFE-driven action selection."""
         self._coaching_turns += 1
         user_text = user_input.get("answer", "").strip()
         choice = user_input.get("choice")
 
         # === EMOTIONAL INFERENCE (Circumplex Model) ===
-        # Predict → Observe → Update loop (Pattisapu & Albarracin 2024)
         emotional_data = self._run_emotional_inference(user_text)
 
         # Update the cognitive model from this message
@@ -1257,48 +1310,143 @@ class CoachingAgent:
             "emotional_inference": emotional_data,
         })
 
-        # Check for session-ending intent
+        # === Keyword overrides: explicit stop always honored ===
         lower = user_text.lower()
         wants_to_stop = any(w in lower for w in [
             "done", "that's enough", "let's stop", "end session",
             "i'm good", "goodbye", "wrap up", "finish",
         ])
-
         if wants_to_stop:
             self._track_conversation("user", user_text)
             result = self._end_session()
+            result["efe_info"] = {"selected_action": "end_session", "override": "explicit_request"}
             self._track_conversation("assistant", result.get("message", ""))
             return result
 
-        # Check for "another step" or wanting more interventions (only if engaged)
-        cog_load = self._assess_cognitive_load(user_text)
+        # === Override: explicit request for more action ===
         wants_more_action = any(w in lower for w in [
             "another step", "next step", "what else",
             "give me something", "another exercise", "what now",
         ])
-
+        cog_load = self._assess_cognitive_load(user_text)
         if wants_more_action and cog_load["coaching_readiness"] != "not_ready":
             self._track_conversation("user", user_text)
             result = self._propose_next_coaching_step()
+            result["efe_info"] = {"selected_action": "propose_intervention", "override": "explicit_request"}
+            result["emotional_state"] = emotional_data
             self._track_conversation("assistant", result.get("message", ""))
             return result
 
-        # Route through LLM for natural conversation
-        # NOTE: user message tracked AFTER LLM call to avoid duplicate
-        # user messages (gen.generate() adds it separately)
-        llm_response = self._llm_generate(user_text)
-        self._track_conversation("user", user_text)
-        response = llm_response or self._generate_coaching_response(user_text)
+        # === EFE-driven action selection ===
+        action_idx, action_name, efe_info = select_coaching_action(
+            beliefs=self.beliefs,
+            model=self.model,
+            phase="coaching",
+            timestep=self.timestep,
+            tom_reliability=self.tom.reliability,
+            empathy_planner=self.empathy,
+            tom_filter=self.tom,
+            target_skill=self.target_skill,
+            current_intervention=self.current_intervention,
+        )
 
-        self._track_conversation("assistant", response)
-        return {
-            "phase": PHASE_COACHING,
-            "message": response,
-            "sphere_data": self.get_sphere_data(),
-            "belief_summary": self.get_belief_summary(),
-            "emotional_state": emotional_data,
-            "is_complete": False,
-        }
+        # Dispatch based on EFE-selected action
+        if action_name == "propose_intervention":
+            self._track_conversation("user", user_text)
+            result = self._propose_next_coaching_step()
+            result["efe_info"] = efe_info
+            result["emotional_state"] = emotional_data
+            self._track_conversation("assistant", result.get("message", ""))
+            return result
+        elif action_name == "end_session":
+            self._track_conversation("user", user_text)
+            result = self._end_session()
+            result["efe_info"] = efe_info
+            result["emotional_state"] = emotional_data
+            self._track_conversation("assistant", result.get("message", ""))
+            return result
+        elif action_name == "safety_check":
+            self._track_conversation("user", user_text)
+            response = (
+                "I want to check in — how are you feeling about all this? "
+                "Sometimes coaching conversations bring up a lot, and I want to make sure "
+                "we're going at the right pace for you."
+            )
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_COACHING,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": efe_info,
+                "is_complete": False,
+            }
+        elif action_name == "show_counterfactual":
+            self._track_conversation("user", user_text)
+            # Show counterfactual comparison for the current target skill
+            gentle, push = get_gentle_push_pair(self.target_skill or SKILL_FACTORS[0])
+            cf = self.empathy.compute_counterfactual(
+                gentle.to_dict(), push.to_dict(), self.tom
+            )
+            cf_text = self.empathy.format_counterfactual_text(cf)
+            llm_response = self._llm_generate(
+                f"[SYSTEM: Present this counterfactual naturally: {cf_text}]"
+            )
+            response = llm_response or (
+                f"Here's what my model predicts for two approaches:\n\n{cf_text}\n\n"
+                "What feels more realistic for you?"
+            )
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_COACHING,
+                "message": response,
+                "counterfactual": cf,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": efe_info,
+                "is_complete": False,
+            }
+        elif action_name == "reframe":
+            # Reframing: use LLM with reframe context
+            llm_response = self._llm_generate(user_text)
+            self._track_conversation("user", user_text)
+            if not llm_response:
+                # Template reframe
+                probe = self._get_next_probe()
+                llm_response = (
+                    "Let me offer a different way to look at this. "
+                    "What you're describing isn't a flaw — it's information about "
+                    "where the friction is. "
+                )
+                if probe:
+                    llm_response += probe
+            self._track_conversation("assistant", llm_response)
+            return {
+                "phase": PHASE_COACHING,
+                "message": llm_response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": efe_info,
+                "is_complete": False,
+            }
+        else:
+            # Default: ask_free_text / adjust_difficulty — conversational response
+            llm_response = self._llm_generate(user_text)
+            self._track_conversation("user", user_text)
+            response = llm_response or self._generate_coaching_response(user_text)
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_COACHING,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": efe_info,
+                "is_complete": False,
+            }
 
     def _get_next_probe(self) -> Optional[str]:
         """Get a probing question for the target skill that hasn't been asked yet."""
@@ -1343,28 +1491,22 @@ class CoachingAgent:
         return None
 
     def _propose_next_coaching_step(self) -> Dict[str, Any]:
-        """Propose the next coaching exercise or intervention."""
-        exercise = self._get_next_exercise()
+        """Propose the next coaching step, using EFE to decide between exercise, probe, or sphere."""
+        # Use EFE to decide what type of next step to offer
+        action_idx, action_name, efe_info = select_coaching_action(
+            beliefs=self.beliefs,
+            model=self.model,
+            phase="coaching",
+            timestep=self.timestep,
+            tom_reliability=self.tom.reliability,
+            empathy_planner=self.empathy,
+            tom_filter=self.tom,
+            target_skill=self.target_skill,
+            current_intervention=self.current_intervention,
+        )
 
-        if exercise:
-            # Pick next skill to work on
-            sorted_skills = self._get_skill_scores_sorted()
-            next_skill = sorted_skills[0][0]
-            for skill_name, score in sorted_skills:
-                if skill_name != self.target_skill:
-                    next_skill = skill_name
-                    break
-
-            skill_label = self._label(next_skill)
-            score = round(sorted_skills[0][1])
-
-            message = (
-                f"Here's something else to try — this one targets your {skill_label}: "
-                f"{exercise}\n\n"
-                f"How does that land?"
-            )
-        else:
-            # We've exhausted our exercises — ask a probing question instead
+        if action_name in ("ask_free_text", "reframe"):
+            # EFE says: probe the user more (epistemic drive)
             probe = self._get_next_probe()
             if probe:
                 message = (
@@ -1376,6 +1518,35 @@ class CoachingAgent:
                     "We've covered a lot of ground. What feels like the most important thing "
                     "you're taking away from this conversation?"
                 )
+        else:
+            # EFE says: propose an exercise (pragmatic drive)
+            exercise = self._get_next_exercise()
+            if exercise:
+                sorted_skills = self._get_skill_scores_sorted()
+                next_skill = sorted_skills[0][0]
+                for skill_name, score in sorted_skills:
+                    if skill_name != self.target_skill:
+                        next_skill = skill_name
+                        break
+                skill_label = self._label(next_skill)
+                message = (
+                    f"Here's something else to try — this one targets your {skill_label}: "
+                    f"{exercise}\n\n"
+                    f"How does that land?"
+                )
+            else:
+                # Exhausted exercises — probe instead
+                probe = self._get_next_probe()
+                if probe:
+                    message = (
+                        f"Before we add more steps, let me understand something better. "
+                        f"{probe}"
+                    )
+                else:
+                    message = (
+                        "We've covered a lot of ground. What feels like the most important thing "
+                        "you're taking away from this conversation?"
+                    )
 
         return {
             "phase": PHASE_COACHING,
@@ -2062,13 +2233,16 @@ class CoachingAgent:
 
         Also extracts structured profile facts and updates the Bayesian network.
         """
-        # Extract profile facts and update causal Bayesian network
-        self.profile.extract_and_store(
+        # Extract profile facts, causal links, and progress signals
+        extraction = self.profile.extract_and_store(
             user_text=user_text,
             turn=self.timestep,
             classifier=self.classifier,
             context=self._get_recent_context(),
         )
+
+        # Apply profile signals and progress to POMDP skill beliefs
+        self._apply_skill_signals(extraction)
 
         lower = user_text.lower()
 
@@ -2121,6 +2295,94 @@ class CoachingAgent:
                 "topics": detected_topics,
                 "user_text_snippet": user_text[:100],
             })
+
+    def _apply_skill_signals(self, extraction: Dict[str, Any]) -> None:
+        """
+        Apply profile and progress signals to update POMDP skill beliefs.
+
+        This closes the feedback loop: facts extracted from conversation
+        (breakup, progress reports, challenges) actually shift the skill
+        beliefs, so the model evolves throughout the session.
+
+        Two sources of signals:
+        1. Profile Bayesian network — inferred states affect skill beliefs
+           (e.g., breakup → emotional_stress → emotional_reg impaired)
+        2. Progress signals — user reports improvement or regression
+           (e.g., "I've been focusing better" → focus belief shifts up)
+        """
+        # --- 1. Apply Bayesian network skill impacts ---
+        bn_impacts = self.profile.bayes_net.get_skill_impacts()
+        for skill, impact in bn_impacts.items():
+            if skill not in self.beliefs or skill not in SKILL_FACTORS:
+                continue
+            if abs(impact) < 0.03:
+                continue  # Too small to matter
+
+            belief = self.beliefs[skill]
+            n_levels = len(belief)
+
+            # Shift belief: positive impact → shift toward higher levels,
+            # negative impact → shift toward lower levels
+            shift_strength = min(abs(impact), 0.3)  # Cap the shift
+            if impact > 0:
+                # Shift probability mass toward higher skill levels
+                target = np.zeros(n_levels)
+                target[-1] = 0.5  # Weight toward high
+                target[-2] = 0.3
+                target[n_levels // 2] = 0.2
+            else:
+                # Shift probability mass toward lower skill levels
+                target = np.zeros(n_levels)
+                target[0] = 0.5  # Weight toward low
+                target[1] = 0.3
+                target[n_levels // 2] = 0.2
+            target = normalize(target)
+
+            # Soft blend: belief = (1 - alpha) * belief + alpha * target
+            alpha = shift_strength * 0.15  # Gentle: max ~4.5% blend per message
+            self.beliefs[skill] = normalize(
+                (1.0 - alpha) * belief + alpha * target
+            )
+
+        # --- 2. Apply progress signals (user-reported improvement/regression) ---
+        progress_signals = extraction.get("progress_signals", [])
+        for signal in progress_signals:
+            skill = signal.get("skill")
+            direction = signal.get("direction")
+            magnitude = signal.get("magnitude", 0.2)
+
+            if skill not in self.beliefs or skill not in SKILL_FACTORS:
+                continue
+
+            belief = self.beliefs[skill]
+            n_levels = len(belief)
+
+            # Progress signals are stronger than passive BN impacts —
+            # user is explicitly reporting behavioral change
+            shift_strength = min(magnitude, 0.5)
+
+            if direction == "improvement":
+                # Shift toward higher levels
+                target = np.zeros(n_levels)
+                for i in range(n_levels):
+                    target[i] = (i + 1) / n_levels  # Linear ramp up
+            else:
+                # Shift toward lower levels
+                target = np.zeros(n_levels)
+                for i in range(n_levels):
+                    target[i] = (n_levels - i) / n_levels  # Linear ramp down
+            target = normalize(target)
+
+            # Stronger blend for explicit progress reports
+            alpha = shift_strength * 0.25  # Up to 12.5% blend
+            self.beliefs[skill] = normalize(
+                (1.0 - alpha) * belief + alpha * target
+            )
+
+            logger.info(
+                f"[Learning] Skill '{skill}' belief shifted ({direction}, "
+                f"magnitude={magnitude:.2f}): {signal.get('evidence', '')}"
+            )
 
     def _soft_update_tom_from_emotions(self, emotions: List[str]) -> None:
         """

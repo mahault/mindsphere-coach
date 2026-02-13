@@ -119,10 +119,57 @@ class SphereModel:
     # SKILL FACTOR MATRICES
     # -------------------------------------------------------------------------
 
+    @staticmethod
+    def _build_improvement_transition(n_s: int, strength: float) -> np.ndarray:
+        """
+        Build a transition matrix with upward shift (skill improvement).
+
+        Creates a near-identity matrix where each state has `strength`
+        probability of moving one level up. The highest state stays put.
+
+        Args:
+            n_s: Number of state levels
+            strength: Probability of moving up one level (e.g., 0.08)
+
+        Returns:
+            Transition matrix [n_s x n_s], columns sum to 1
+        """
+        B = np.eye(n_s, dtype=np.float64) * (1.0 - strength)
+        # Add upward shift: p(s+1 | s) = strength
+        for s in range(n_s - 1):
+            B[s + 1, s] += strength
+        # Highest state: no room to go up, stays put
+        B[-1, -1] = 1.0 - strength  # was set above
+        B[-1, -1] += strength        # add the shift mass back (stays)
+        # Add small noise floor
+        noise = 0.005
+        B = B * (1.0 - noise) + np.ones((n_s, n_s)) * noise / n_s
+        # Normalize columns
+        for col in range(n_s):
+            B[:, col] = normalize(B[:, col])
+        return B
+
     def _build_skill_matrices(self) -> None:
         """Build A/B/C/D for each of the 8 skill factors."""
         n_s = self.spec.n_skill_levels  # 5
         n_o = self.spec.n_mc_options     # 4
+
+        # Action indices for reference
+        # 0: ask_mc, 1: ask_free_text, 2: show_sphere
+        # 3: propose_intervention, 4: reframe, 5: adjust_difficulty
+        # 6: show_counterfactual, 7: safety_check, 8: end_session
+
+        identity_noisy = (
+            np.eye(n_s, dtype=np.float64) * 0.98
+            + np.ones((n_s, n_s), dtype=np.float64) * 0.02 / n_s
+        )
+        # Normalize the template
+        for col in range(n_s):
+            identity_noisy[:, col] = normalize(identity_noisy[:, col])
+
+        # Pre-build improvement transitions (shared across skills)
+        B_intervention = self._build_improvement_transition(n_s, strength=0.08)
+        B_reframe = self._build_improvement_transition(n_s, strength=0.04)
 
         for skill in self.spec.skill_factors:
             # A matrix: p(answer | skill_level) [n_obs x n_states]
@@ -138,15 +185,16 @@ class SphereModel:
                 A[:, col] = normalize(A[:, col])
             self.A[skill] = A
 
-            # B matrix: p(s' | s, action) - skills mostly stable during session
+            # B matrix: p(s' | s, action) — action-discriminative
             # [n_actions x n_states x n_states]
             B = np.zeros((self.spec.n_actions, n_s, n_s), dtype=np.float64)
-            identity = np.eye(n_s, dtype=np.float64)
             for a in range(self.spec.n_actions):
-                B[a] = identity * 0.98 + np.ones((n_s, n_s)) * 0.02 / n_s
-                # Normalize columns
-                for col in range(n_s):
-                    B[a, :, col] = normalize(B[a, :, col])
+                if a == 3:    # propose_intervention: ~8% chance of skill improvement
+                    B[a] = B_intervention.copy()
+                elif a == 4:  # reframe: ~4% chance of skill improvement
+                    B[a] = B_reframe.copy()
+                else:         # all other actions: near-identity (no skill change)
+                    B[a] = identity_noisy.copy()
             self.B[skill] = B
 
             # C vector: prefer high-skill observations
@@ -218,14 +266,41 @@ class SphereModel:
             self.A[factor_name] = A
 
             # B: friction can shift based on coaching actions
+            # Action-discriminative: adjust_difficulty and safety_check
+            # shift overwhelm_sensitivity toward lower values
             B = np.zeros(
                 (self.spec.n_actions, n_levels, n_levels), dtype=np.float64
             )
+            identity_f = (
+                np.eye(n_levels, dtype=np.float64) * 0.9
+                + np.ones((n_levels, n_levels)) * 0.1 / n_levels
+            )
+            for col in range(n_levels):
+                identity_f[:, col] = normalize(identity_f[:, col])
+
             for a in range(self.spec.n_actions):
-                B[a] = np.eye(n_levels, dtype=np.float64) * 0.9 + \
-                       np.ones((n_levels, n_levels)) * 0.1 / n_levels
-                for col in range(n_levels):
-                    B[a, :, col] = normalize(B[a, :, col])
+                if factor_name == "overwhelm_sensitivity" and a == 5:
+                    # adjust_difficulty: shift overwhelm toward lower (10%)
+                    B_adj = np.eye(n_levels, dtype=np.float64) * 0.85
+                    for s in range(1, n_levels):
+                        B_adj[s - 1, s] += 0.10  # shift down
+                    B_adj[0, 0] += 0.10  # lowest stays
+                    B_adj += np.ones((n_levels, n_levels)) * 0.05 / n_levels
+                    for col in range(n_levels):
+                        B_adj[:, col] = normalize(B_adj[:, col])
+                    B[a] = B_adj
+                elif factor_name == "overwhelm_sensitivity" and a == 7:
+                    # safety_check: small shift toward lower overwhelm (5%)
+                    B_safe = np.eye(n_levels, dtype=np.float64) * 0.88
+                    for s in range(1, n_levels):
+                        B_safe[s - 1, s] += 0.05  # shift down
+                    B_safe[0, 0] += 0.05
+                    B_safe += np.ones((n_levels, n_levels)) * 0.07 / n_levels
+                    for col in range(n_levels):
+                        B_safe[:, col] = normalize(B_safe[:, col])
+                    B[a] = B_safe
+                else:
+                    B[a] = identity_f.copy()
             self.B[factor_name] = B
 
             # C: prefer low overwhelm, moderate autonomy
