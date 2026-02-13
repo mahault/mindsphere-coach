@@ -1010,7 +1010,23 @@ class CoachingAgent:
             "emotional_inference": emotional_data,
         })
 
-        # === Keyword overrides: explicit coaching request always honored ===
+        # === Companion gate: be present when user needs it ===
+        if cog_load["coaching_readiness"] == "not_ready":
+            logger.info(f"[Viz] Companion mode (signals={cog_load['signals']})")
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
+            self._track_conversation("user", user_text)
+            response = llm_response or self._respond_to_sphere_reaction(user_text)
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_VISUALIZATION,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "efe_info": {"selected_action": "companion_chat", "override": "not_coaching_ready"},
+                "is_complete": False,
+            }
+
+        # === Decide action FIRST, then make one LLM call ===
         lower = user_text.lower()
         wants_coaching = any(w in lower for w in [
             "suggest", "what should", "help me", "what can i do",
@@ -1018,46 +1034,51 @@ class CoachingAgent:
             "what do you recommend", "first step",
         ])
 
-        # Try LLM first — it handles off-topic naturally
+        # Determine whether we're transitioning to planning
+        should_transition = False
+        efe_info = None
+
+        if wants_coaching:
+            should_transition = True
+            efe_info = {"selected_action": "propose_intervention", "override": "explicit_request"}
+        elif self._viz_turns >= 2:
+            emotion_error_mag = emotional_data.get("error", {}).get("magnitude", 0.0)
+            valence_belief = self.emotion.belief_valence
+
+            action_idx, action_name, efe_info = select_coaching_action(
+                beliefs=self.beliefs,
+                model=self.model,
+                phase="visualization",
+                timestep=self.timestep,
+                tom_reliability=self.tom.reliability,
+                empathy_planner=self.empathy,
+                tom_filter=self.tom,
+                target_skill=self.target_skill,
+                current_intervention=self.current_intervention,
+                emotion_prediction_error=emotion_error_mag,
+                emotion_valence_belief=valence_belief,
+            )
+            propose_prob = efe_info["action_probabilities"].get("propose_intervention", 0)
+            if action_name == "propose_intervention" and propose_prob > 0.45:
+                should_transition = True
+
+        if should_transition:
+            # Transition to planning — _generate_plan_message makes the single LLM call
+            self._track_conversation("user", user_text)
+            result = self._transition_to_planning()
+            result["efe_info"] = efe_info or {"selected_action": "propose_intervention"}
+            self._track_conversation("assistant", result["message"])
+            return result
+
+        # Stay in visualization — one LLM call for conversational response
         llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
         self._track_conversation("user", user_text)
         response = llm_response or self._respond_to_sphere_reaction(user_text)
-
-        if wants_coaching:
-            result = self._transition_to_planning_with_bridge(response)
-            result["efe_info"] = {"selected_action": "propose_intervention", "override": "explicit_request"}
-            self._track_conversation("assistant", result["message"])
-            return result
-
-        # === EFE-driven action selection ===
-        emotion_error_mag = emotional_data.get("error", {}).get("magnitude", 0.0)
-        valence_belief = self.emotion.belief_valence
-
-        action_idx, action_name, efe_info = select_coaching_action(
-            beliefs=self.beliefs,
-            model=self.model,
-            phase="visualization",
-            timestep=self.timestep,
-            tom_reliability=self.tom.reliability,
-            empathy_planner=self.empathy,
-            tom_filter=self.tom,
-            target_skill=self.target_skill,
-            current_intervention=self.current_intervention,
-            emotion_prediction_error=emotion_error_mag,
-            emotion_valence_belief=valence_belief,
-        )
-
-        # Only transition when EFE strongly favors it AND we've had some discussion
-        propose_prob = efe_info["action_probabilities"].get("propose_intervention", 0)
-        if action_name == "propose_intervention" and propose_prob > 0.45 and self._viz_turns >= 2:
-            # EFE confidently says transition to planning
-            result = self._transition_to_planning_with_bridge(response)
-            result["efe_info"] = efe_info
-            self._track_conversation("assistant", result["message"])
-            return result
-
-        # ask_free_text or show_sphere (or propose_intervention below threshold): stay in visualization
         self._track_conversation("assistant", response)
+
+        if efe_info is None:
+            efe_info = {"selected_action": "ask_free_text", "phase": "visualization"}
+
         return {
             "phase": PHASE_VISUALIZATION,
             "message": response,
@@ -1070,14 +1091,6 @@ class CoachingAgent:
     # -------------------------------------------------------------------------
     # PLANNING PHASE
     # -------------------------------------------------------------------------
-
-    def _transition_to_planning_with_bridge(self, bridge_text: str) -> Dict[str, Any]:
-        """Transition to planning with a conversational bridge from the discussion."""
-        planning_result = self._transition_to_planning()
-        # Prepend the bridge response so the user sees both the reply
-        # to their message AND the planning introduction
-        planning_result["message"] = bridge_text + "\n\n" + planning_result["message"]
-        return planning_result
 
     def _transition_to_planning(self) -> Dict[str, Any]:
         """Transition to planning: propose first intervention using EFE to select skill."""
