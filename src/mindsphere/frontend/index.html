@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MindSphere Coach</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app">
+        <!-- Header -->
+        <header id="header">
+            <h1>MindSphere Coach</h1>
+            <div id="phase-indicator">
+                <span id="phase-label">Starting...</span>
+                <div id="progress-bar"><div id="progress-fill"></div></div>
+            </div>
+            <div id="empathy-dial">
+                <label for="empathy-slider">Empathy: </label>
+                <input type="range" id="empathy-slider" min="0" max="100" value="50">
+                <span id="empathy-value">0.50</span>
+            </div>
+        </header>
+
+        <!-- Main content -->
+        <div id="main-content">
+            <!-- Chat panel (left) -->
+            <div id="chat-panel">
+                <div id="chat-messages"></div>
+                <div id="mc-options" class="hidden"></div>
+                <div id="choice-buttons" class="hidden">
+                    <button class="choice-btn accept" data-choice="accept">I'll do it</button>
+                    <button class="choice-btn too-hard" data-choice="too_hard">Too hard</button>
+                    <button class="choice-btn not-relevant" data-choice="not_relevant">Not relevant</button>
+                </div>
+                <div id="chat-input-area">
+                    <input type="text" id="chat-input" placeholder="Type your response..." />
+                    <button id="send-btn">Send</button>
+                </div>
+            </div>
+
+            <!-- Right panel (sphere + plan) -->
+            <div id="right-panel">
+                <!-- Sphere visualization -->
+                <div id="sphere-panel" class="hidden">
+                    <div id="radar-chart"></div>
+                    <div id="bottleneck-info"></div>
+                </div>
+
+                <!-- Plan / Counterfactual panel -->
+                <div id="plan-panel" class="hidden">
+                    <h3>Proposed Step</h3>
+                    <div id="intervention-card"></div>
+                    <div id="counterfactual-display"></div>
+                </div>
+
+                <!-- Belief panel (collapsible) -->
+                <details id="belief-panel">
+                    <summary>Your Profile (live)</summary>
+                    <div id="belief-content"></div>
+                    <div id="tom-stats"></div>
+                </details>
+            </div>
+        </div>
+
+        <!-- Safety notice -->
+        <div id="safety-notice" class="hidden">
+            I'm optimizing for your wellbeing, not compliance. If anything feels coercive,
+            <button id="safety-btn">tell me</button>.
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
