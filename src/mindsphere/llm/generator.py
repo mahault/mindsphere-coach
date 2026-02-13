@@ -352,6 +352,16 @@ class CoachGenerator:
         roles = [m["role"] for m in messages]
         logger.info(f"[CoachGenerator] Sending {len(messages)} messages to Mistral (roles: {roles[-5:]})")
 
+        # Detect duplicate user messages (bug diagnostic)
+        user_msgs = [m["content"][:80] for m in messages if m["role"] == "user"]
+        if len(user_msgs) >= 2 and user_msgs[-1] == user_msgs[-2]:
+            logger.warning(f"[CoachGenerator] DUPLICATE user message detected! '{user_msgs[-1]}...'")
+
+        # Log the last few messages for debugging conversation flow
+        for i, m in enumerate(messages[-4:]):
+            preview = m["content"][:120].replace("\n", " ")
+            logger.info(f"[CoachGenerator]   msg[{len(messages)-4+i}] {m['role']}: {preview}...")
+
         # Web search tool (disabled if WEB_SEARCH_TOOL is None)
         tools = [WEB_SEARCH_TOOL] if (enable_web_search and WEB_SEARCH_TOOL) else None
 

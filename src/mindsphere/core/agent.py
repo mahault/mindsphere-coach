@@ -1352,9 +1352,14 @@ class CoachingAgent:
         # === Companion mode: respect off-topic and deflection ===
         if cog_load["coaching_readiness"] == "not_ready":
             # User is off-topic, deflecting, or disengaged — be a companion
-            self._track_conversation("user", user_text)
+            logger.info(f"[Coaching] Companion mode triggered (signals={cog_load['signals']}, readiness={cog_load['coaching_readiness']})")
+            # NOTE: _llm_generate MUST be called BEFORE _track_conversation
+            # because the generator also appends user_message to the messages list.
+            # Tracking first would cause the user message to appear twice.
             llm_response = self._llm_generate(user_text)
+            self._track_conversation("user", user_text)
             response = llm_response or self._generate_companion_response(user_text)
+            logger.info(f"[Coaching] Companion response (llm={'yes' if llm_response else 'template'}, len={len(response)})")
             self._track_conversation("assistant", response)
             return {
                 "phase": PHASE_COACHING,
@@ -1380,6 +1385,7 @@ class CoachingAgent:
         )
 
         # Dispatch based on EFE-selected action
+        logger.info(f"[Coaching] EFE selected: {action_name} (probs={efe_info.get('action_probabilities', {})})")
         if action_name == "propose_intervention":
             self._track_conversation("user", user_text)
             result = self._propose_next_coaching_step()
