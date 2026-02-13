@@ -192,10 +192,15 @@ class CoachingAgent:
                 self._classifier = None
         return self._classifier
 
-    def _llm_generate(self, user_message: str) -> str:
+    def _llm_generate(self, user_message: str, cognitive_load: Optional[Dict] = None) -> str:
         """
         Try to generate a response via LLM. Returns empty string if unavailable.
         The caller should fall back to template responses when this returns "".
+
+        Args:
+            user_message: The user's text
+            cognitive_load: Pre-computed cognitive load dict (avoids double-calling
+                _assess_cognitive_load which duplicates sentiment tracking)
         """
         gen = self.generator
         if gen is None:
@@ -211,8 +216,9 @@ class CoachingAgent:
                 "difficulty": self.current_intervention.difficulty,
             }
 
-        # Build enriched cognitive load with inferred user state + emotional data
-        cognitive_load = self._assess_cognitive_load(user_message)
+        # Use pre-computed cognitive load if provided, otherwise compute fresh
+        if cognitive_load is None:
+            cognitive_load = self._assess_cognitive_load(user_message)
         user_state = self.get_inferred_user_state()
         cognitive_load["inferred_emotions"] = user_state.get("recent_emotions", [])
         cognitive_load["inferred_topics"] = user_state.get("recent_topics", [])
@@ -1013,7 +1019,7 @@ class CoachingAgent:
         ])
 
         # Try LLM first — it handles off-topic naturally
-        llm_response = self._llm_generate(user_text)
+        llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
         self._track_conversation("user", user_text)
         response = llm_response or self._respond_to_sphere_reaction(user_text)
 
@@ -1396,7 +1402,7 @@ class CoachingAgent:
             # NOTE: _llm_generate MUST be called BEFORE _track_conversation
             # because the generator also appends user_message to the messages list.
             # Tracking first would cause the user message to appear twice.
-            llm_response = self._llm_generate(user_text)
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
             self._track_conversation("user", user_text)
             response = llm_response or self._generate_companion_response(user_text)
             logger.info(f"[Coaching] Companion response (llm={'yes' if llm_response else 'template'}, len={len(response)})")
@@ -1471,7 +1477,8 @@ class CoachingAgent:
             )
             cf_text = self.empathy.format_counterfactual_text(cf)
             llm_response = self._llm_generate(
-                f"[SYSTEM: Present this counterfactual naturally: {cf_text}]"
+                f"[SYSTEM: Present this counterfactual naturally: {cf_text}]",
+                cognitive_load=cog_load,
             )
             response = llm_response or (
                 f"Here's what my model predicts for two approaches:\n\n{cf_text}\n\n"
@@ -1490,7 +1497,7 @@ class CoachingAgent:
             }
         elif action_name == "reframe":
             # Reframing: use LLM with reframe context
-            llm_response = self._llm_generate(user_text)
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
             self._track_conversation("user", user_text)
             if not llm_response:
                 # Template reframe
@@ -1514,7 +1521,7 @@ class CoachingAgent:
             }
         else:
             # Default: ask_free_text / adjust_difficulty — conversational response
-            llm_response = self._llm_generate(user_text)
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
             self._track_conversation("user", user_text)
             response = llm_response or self._generate_coaching_response(user_text)
             self._track_conversation("assistant", response)
