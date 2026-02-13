@@ -869,24 +869,20 @@ class CoachingAgent:
 
         # Check if calibration is complete
         if len(self.asked_question_ids) >= self._max_calibration_questions:
-            # Generate ack for the LAST answer before transitioning
+            # Don't generate a separate ack — the sphere commentary will
+            # acknowledge the last answer as part of its single LLM call.
+            # Generating a separate ack causes two LLM responses to be
+            # concatenated, producing the "double response" problem.
             user_text = user_input.get("answer", "")
-            last_ack = self._generate_calibration_ack(user_text, q)
             self._track_conversation("user", user_text)
-            # NOTE: Don't track last_ack here — _transition_to_visualization
-            # prepends it to the commentary and tracks the combined message.
-            # Tracking it here AND there causes duplicate assistant messages
-            # in the conversation history, which makes the LLM repeat itself.
-            return self._transition_to_visualization(last_ack)
+            return self._transition_to_visualization()
 
         # Get next question
         next_q = self._get_next_question()
         if next_q is None:
             user_text = user_input.get("answer", "")
-            last_ack = self._generate_calibration_ack(user_text, q)
             self._track_conversation("user", user_text)
-            # Same as above — don't double-track
-            return self._transition_to_visualization(last_ack)
+            return self._transition_to_visualization()
 
         self.current_question = next_q
 
@@ -963,26 +959,21 @@ class CoachingAgent:
     # VISUALIZATION PHASE
     # -------------------------------------------------------------------------
 
-    def _transition_to_visualization(self, last_ack: str = "") -> Dict[str, Any]:
+    def _transition_to_visualization(self) -> Dict[str, Any]:
         """Transition from calibration to visualization with personalized commentary."""
         self.phase = PHASE_VISUALIZATION
         self._viz_turns = 0
         sphere_data = self.get_sphere_data()
 
-        # Generate personalized sphere commentary
+        # Single LLM call generates both acknowledgment of last answer
+        # and sphere commentary together — avoids double-response problem
         commentary = self._generate_sphere_commentary()
 
-        # Prepend the ack for the last calibration answer so it doesn't get lost
-        if last_ack:
-            full_message = last_ack + "\n\n" + commentary
-        else:
-            full_message = commentary
-
-        self._track_conversation("assistant", full_message)
+        self._track_conversation("assistant", commentary)
 
         return {
             "phase": PHASE_VISUALIZATION,
-            "message": full_message,
+            "message": commentary,
             "sphere_data": sphere_data,
             "belief_summary": self.get_belief_summary(),
             "is_complete": False,
@@ -1934,8 +1925,9 @@ class CoachingAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"[SYSTEM: Share what the sphere shows — like a perceptive friend noticing patterns, "
-                        f"not a report. Do NOT repeat what you just said about their last answer. "
+                        f"[SYSTEM: First briefly acknowledge their last answer (1 sentence), then share "
+                        f"what the sphere shows — like a perceptive friend noticing patterns, not a report. "
+                        f"This should be ONE cohesive response, not two separate parts. "
                         f"Data for reference (don't recite it all): {sphere_context}]"
                     ),
                 })
