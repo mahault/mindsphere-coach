@@ -141,8 +141,8 @@ async function sendMessage(content, extra = {}) {
         if (data.phase !== 'calibration') {
             els.chatInputArea.classList.remove('hidden');
 
-            // Also show choice buttons in planning/update (alongside text input)
-            if ((data.phase === 'planning' || data.phase === 'update') && !data.is_complete) {
+            // Only show choice buttons when there's an actual intervention to respond to
+            if ((data.phase === 'planning' || data.phase === 'update') && !data.is_complete && data.intervention) {
                 els.choiceButtons.classList.remove('hidden');
                 els.chatInput.placeholder = 'Or type your thoughts...';
             } else {

@@ -361,8 +361,15 @@ class CoachingAgent:
 
     def _track_conversation(self, role: str, content: str) -> None:
         """Add a message to conversation history for LLM context."""
-        if content:
-            self.conversation_history.append({"role": role, "content": content})
+        if not content:
+            return
+        # Warn on consecutive same-role duplicate messages
+        if (self.conversation_history
+                and self.conversation_history[-1]["role"] == role
+                and self.conversation_history[-1]["content"] == content):
+            logger.warning(f"[Track] Skipping duplicate {role} message: '{content[:60]}...'")
+            return
+        self.conversation_history.append({"role": role, "content": content})
 
     # -------------------------------------------------------------------------
     # PREDICT-OBSERVE-UPDATE — Circumplex Emotional Inference
@@ -835,7 +842,10 @@ class CoachingAgent:
             user_text = user_input.get("answer", "")
             last_ack = self._generate_calibration_ack(user_text, q)
             self._track_conversation("user", user_text)
-            self._track_conversation("assistant", last_ack)
+            # NOTE: Don't track last_ack here — _transition_to_visualization
+            # prepends it to the commentary and tracks the combined message.
+            # Tracking it here AND there causes duplicate assistant messages
+            # in the conversation history, which makes the LLM repeat itself.
             return self._transition_to_visualization(last_ack)
 
         # Get next question
@@ -844,7 +854,7 @@ class CoachingAgent:
             user_text = user_input.get("answer", "")
             last_ack = self._generate_calibration_ack(user_text, q)
             self._track_conversation("user", user_text)
-            self._track_conversation("assistant", last_ack)
+            # Same as above — don't double-track
             return self._transition_to_visualization(last_ack)
 
         self.current_question = next_q
