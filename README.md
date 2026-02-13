@@ -1,3 +1,12 @@
+---
+title: MindSphere Coach
+emoji: 🧠
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+---
+
 # MindSphere Coach
 
 An interactive coaching agent that uses **Active Inference**, **Theory of Mind**, and **empathic planning** to help people identify and overcome personal growth bottlenecks.
