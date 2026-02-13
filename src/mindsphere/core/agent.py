@@ -254,14 +254,15 @@ class CoachingAgent:
             logger.warning(f"[LLM] Empty response — falling back to template (phase={self.phase})")
         return result
 
-    def _assess_cognitive_load(self, user_message: str = "") -> Dict[str, Any]:
+    def _assess_cognitive_load(self, user_message: str = "", emotional_data: Optional[Dict] = None) -> Dict[str, Any]:
         """
-        Infer cognitive load from ToM dimensions + conversation signals.
+        Infer cognitive load from ToM dimensions + conversation signals + emotional state.
 
         Uses:
         - ToM overwhelm_threshold (low = easily overwhelmed)
         - Recent sentiment signals from conversation
         - Message length and engagement patterns
+        - Emotional valence beliefs and prediction error from Circumplex POMDP
         """
         # ToM-based assessment
         tom_type = self.tom.get_user_type_summary()
@@ -321,6 +322,27 @@ class CoachingAgent:
         if len(user_message.strip()) < 10 and user_message.strip():
             signals.append("low_effort")
 
+        # === Emotional state integration (from Circumplex POMDP) ===
+        if emotional_data:
+            beliefs = emotional_data.get("emotional_beliefs", {})
+            valence_belief = beliefs.get("valence", {}).get("belief", [])
+
+            # Valence belief concentrated on negative states → emotional distress
+            if len(valence_belief) >= 5:
+                negative_mass = valence_belief[0] + valence_belief[1]
+                if negative_mass > 0.6:
+                    signals.append("emotional_distress")
+
+            # High prediction error → our emotional model was wrong
+            error_data = emotional_data.get("error", {})
+            if error_data.get("magnitude", 0) > 0.5:
+                signals.append("emotional_surprise")
+
+            # Current valence strongly negative
+            current = emotional_data.get("current_emotion", {})
+            if current and current.get("valence", 0) < -0.3:
+                signals.append("low_valence")
+
         # Track recent sentiments
         self._recent_sentiments.append(
             "disengaged" if "disengaged" in signals
@@ -343,6 +365,9 @@ class CoachingAgent:
             coaching_readiness = "not_ready"
         elif "off_topic" in signals or "deflection" in signals:
             load_level = "redirected"
+            coaching_readiness = "not_ready"
+        elif "emotional_distress" in signals or "low_valence" in signals:
+            load_level = "emotionally_vulnerable"
             coaching_readiness = "not_ready"
         elif "engaged" in signals:
             load_level = "optimal"
@@ -965,8 +990,8 @@ class CoachingAgent:
         # Run emotional inference
         emotional_data = self._run_emotional_inference(user_text)
 
-        # Assess cognitive load / intent
-        cog_load = self._assess_cognitive_load(user_text)
+        # Assess cognitive load / intent (with emotional data)
+        cog_load = self._assess_cognitive_load(user_text, emotional_data=emotional_data)
 
         # Update cognitive model
         self._update_user_model_from_text(user_text)
@@ -999,6 +1024,9 @@ class CoachingAgent:
             return result
 
         # === EFE-driven action selection ===
+        emotion_error_mag = emotional_data.get("error", {}).get("magnitude", 0.0)
+        valence_belief = self.emotion.belief_valence
+
         action_idx, action_name, efe_info = select_coaching_action(
             beliefs=self.beliefs,
             model=self.model,
@@ -1009,6 +1037,8 @@ class CoachingAgent:
             tom_filter=self.tom,
             target_skill=self.target_skill,
             current_intervention=self.current_intervention,
+            emotion_prediction_error=emotion_error_mag,
+            emotion_valence_belief=valence_belief,
         )
 
         # Only transition when EFE strongly favors it AND we've had some discussion
@@ -1350,7 +1380,7 @@ class CoachingAgent:
             "another step", "next step", "what else",
             "give me something", "another exercise", "what now",
         ])
-        cog_load = self._assess_cognitive_load(user_text)
+        cog_load = self._assess_cognitive_load(user_text, emotional_data=emotional_data)
         if wants_more_action and cog_load["coaching_readiness"] != "not_ready":
             self._track_conversation("user", user_text)
             result = self._propose_next_coaching_step()
@@ -1382,6 +1412,9 @@ class CoachingAgent:
             }
 
         # === EFE-driven action selection ===
+        emotion_error_mag = emotional_data.get("error", {}).get("magnitude", 0.0)
+        valence_belief = self.emotion.belief_valence
+
         action_idx, action_name, efe_info = select_coaching_action(
             beliefs=self.beliefs,
             model=self.model,
@@ -1392,6 +1425,8 @@ class CoachingAgent:
             tom_filter=self.tom,
             target_skill=self.target_skill,
             current_intervention=self.current_intervention,
+            emotion_prediction_error=emotion_error_mag,
+            emotion_valence_belief=valence_belief,
         )
 
         # Dispatch based on EFE-selected action

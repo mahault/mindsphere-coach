@@ -48,12 +48,14 @@ def compute_lambda_epist(
     timestep: int,
     tom_reliability: float,
     beliefs: Optional[Dict[str, np.ndarray]] = None,
+    emotion_prediction_error: float = 0.0,
 ) -> float:
     """
     Compute the epistemic drive weight, balancing exploration vs exploitation.
 
     Starts high (explore the user) and decays toward pragmatic (propose actions).
-    Boosted when ToM reliability is low or beliefs are uncertain.
+    Boosted when ToM reliability is low, beliefs are uncertain, or emotional
+    prediction error is high (model is wrong about user's emotional state).
     """
     # Phase-dependent base value
     phase_base = {
@@ -78,7 +80,13 @@ def compute_lambda_epist(
     # Reliability discount: boost epistemic when ToM is unreliable
     reliability_factor = 1.0 + max(0.0, 0.5 - tom_reliability)
 
-    result = phase_base * temporal_factor * uncertainty_factor * reliability_factor
+    # Emotion prediction error boost: when our emotional model is wrong,
+    # increase exploration (ask questions, don't push interventions)
+    emotion_factor = 1.0
+    if emotion_prediction_error > 0.2:
+        emotion_factor = 1.0 + 0.8 * min(emotion_prediction_error, 1.0)
+
+    result = phase_base * temporal_factor * uncertainty_factor * reliability_factor * emotion_factor
     return result
 
 
@@ -95,6 +103,8 @@ def select_coaching_action(
     target_skill: Optional[str] = None,
     current_intervention=None,
     beta: float = 4.0,
+    emotion_prediction_error: float = 0.0,
+    emotion_valence_belief: Optional[np.ndarray] = None,
 ) -> Tuple[int, str, Dict]:
     """
     Full EFE-driven action selection with empathy blending.
@@ -110,6 +120,8 @@ def select_coaching_action(
         target_skill: Currently targeted skill (optional)
         current_intervention: Current intervention dict (optional)
         beta: Inverse temperature for softmax
+        emotion_prediction_error: Magnitude of emotional prediction error [0, ~1.4]
+        emotion_valence_belief: 5-element belief over valence states (optional)
 
     Returns:
         (action_idx, action_name, efe_info_dict)
@@ -117,7 +129,8 @@ def select_coaching_action(
     valid = VALID_ACTIONS.get(phase, [A_ASK_FREE, A_PROPOSE])
 
     lambda_epist = compute_lambda_epist(
-        phase, timestep, tom_reliability, beliefs
+        phase, timestep, tom_reliability, beliefs,
+        emotion_prediction_error=emotion_prediction_error,
     )
 
     # Determine which factors are relevant
@@ -171,6 +184,29 @@ def select_coaching_action(
         action_probs = blended_probs
         efe_values = blended_values
 
+    # Step 3: Emotional valence penalty on intervention actions
+    # When the user is in a negative emotional state, penalize pushing
+    # coaching interventions — prefer softer actions (ask, safety_check)
+    valence_negative_mass = None
+    if emotion_valence_belief is not None and len(emotion_valence_belief) >= 5:
+        valence_negative_mass = float(emotion_valence_belief[0] + emotion_valence_belief[1])
+        if valence_negative_mass > 0.4:
+            penalty = 0.5 * valence_negative_mass
+            for i, v in enumerate(valid):
+                if v in intervention_actions:
+                    efe_values[i] += penalty  # Higher G = worse action
+            # Re-select with penalty applied
+            from .utils import softmax as _softmax
+            q_values = -efe_values
+            penalized_probs = _softmax(q_values, temperature=1.0 / max(beta, 0.01))
+            best_idx = int(np.argmax(penalized_probs))
+            action_idx = valid[best_idx]
+            action_probs = penalized_probs
+            logger.info(
+                f"[EFE] Emotional valence penalty applied (neg_mass={valence_negative_mass:.2f}, "
+                f"penalty={penalty:.2f})"
+            )
+
     action_name = ACTION_NAMES[action_idx]
 
     info = {
@@ -185,6 +221,8 @@ def select_coaching_action(
         },
         "lambda_epist": round(lambda_epist, 3),
         "phase": phase,
+        "emotion_prediction_error": round(emotion_prediction_error, 3),
+        "valence_negative_mass": round(valence_negative_mass, 3) if valence_negative_mass is not None else None,
     }
 
     logger.info(
