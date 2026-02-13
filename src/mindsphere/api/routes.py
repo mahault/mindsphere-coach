@@ -32,6 +32,18 @@ def get_session_manager() -> SessionManager:
     return session_manager
 
 
+@router.get("/status")
+async def status():
+    """Check system status including LLM availability."""
+    try:
+        from ..llm.client import MistralClient
+        client = MistralClient()
+        llm_available = client.is_available
+    except Exception:
+        llm_available = False
+    return {"llm_available": llm_available}
+
+
 @router.post("/session/start", response_model=StartSessionResponse)
 async def start_session(request: StartSessionRequest = StartSessionRequest()):
     """Start a new coaching session."""

@@ -78,6 +78,30 @@ body {
     transition: width 0.3s ease;
 }
 
+/* LLM status badge */
+.llm-badge {
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    font-weight: 500;
+    letter-spacing: 0.3px;
+}
+
+.llm-badge.loading {
+    background: rgba(161, 161, 170, 0.15);
+    color: var(--text-secondary);
+}
+
+.llm-badge.connected {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--accent-green);
+}
+
+.llm-badge.template {
+    background: rgba(245, 158, 11, 0.15);
+    color: var(--accent-amber);
+}
+
 #empathy-dial {
     display: flex;
     align-items: center;

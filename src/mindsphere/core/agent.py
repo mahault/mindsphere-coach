@@ -305,6 +305,18 @@ class CoachingAgent:
         if any(w in lower for w in offtopic_words):
             signals.append("off_topic")
 
+        # Detect deflection / topic change
+        deflection_words = [
+            "don't want to talk about", "not want to talk",
+            "change the subject", "change topic", "something else",
+            "let's talk about", "can we talk about", "i want to talk about",
+            "anyway", "never mind", "forget it", "moving on",
+            "i'd rather", "not right now", "not now",
+            "but what about", "what about", "how about",
+        ]
+        if any(w in lower for w in deflection_words):
+            signals.append("deflection")
+
         # Short messages may indicate low engagement
         if len(user_message.strip()) < 10 and user_message.strip():
             signals.append("low_effort")
@@ -329,7 +341,7 @@ class CoachingAgent:
         elif recent_disengaged >= 2 or "disengaged" in signals:
             load_level = "low_engagement"
             coaching_readiness = "not_ready"
-        elif "off_topic" in signals:
+        elif "off_topic" in signals or "deflection" in signals:
             load_level = "redirected"
             coaching_readiness = "not_ready"
         elif "engaged" in signals:
@@ -1337,6 +1349,23 @@ class CoachingAgent:
             self._track_conversation("assistant", result.get("message", ""))
             return result
 
+        # === Companion mode: respect off-topic and deflection ===
+        if cog_load["coaching_readiness"] == "not_ready":
+            # User is off-topic, deflecting, or disengaged — be a companion
+            self._track_conversation("user", user_text)
+            llm_response = self._llm_generate(user_text)
+            response = llm_response or self._generate_companion_response(user_text)
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_COACHING,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": {"selected_action": "companion_chat", "override": "not_coaching_ready"},
+                "is_complete": False,
+            }
+
         # === EFE-driven action selection ===
         action_idx, action_name, efe_info = select_coaching_action(
             beliefs=self.beliefs,
@@ -1681,6 +1710,43 @@ class CoachingAgent:
                 "what feels like the most important thing right now? Is there something "
                 "specific you'd like to work on, or should I suggest another step?"
             )
+
+    def _generate_companion_response(self, user_text: str) -> str:
+        """Template fallback when user is off-topic and LLM is unavailable.
+
+        Instead of forcing coaching, acknowledges what the user said and
+        follows their lead — companion first, coach second.
+        """
+        lower = user_text.lower()
+
+        # Detect explicit deflection from coaching
+        deflecting = any(w in lower for w in [
+            "don't want to talk about", "not want to talk",
+            "something else", "never mind", "forget it",
+            "not right now", "not now", "moving on",
+        ])
+        if deflecting:
+            return (
+                "No pressure at all — we can talk about whatever you want. "
+                "What's on your mind?"
+            )
+
+        # Detect overwhelm / disengagement
+        overwhelmed = any(w in lower for w in [
+            "overwhelmed", "too much", "can't handle", "exhausted",
+        ])
+        if overwhelmed:
+            return (
+                "Hey, let's slow down. We don't have to push through anything right now. "
+                "What would feel good to talk about instead?"
+            )
+
+        # User brought up a non-coaching topic — engage with it
+        return (
+            "I'm happy to chat about that! "
+            "We can always come back to the other stuff whenever — or not. "
+            "Tell me more."
+        )
 
     def _end_session(self) -> Dict[str, Any]:
         """End the coaching session with a summary."""
