@@ -1879,8 +1879,9 @@ class CoachingAgent:
                 messages.append({
                     "role": "user",
                     "content": (
-                        f"[SYSTEM: Generate the sphere commentary. {sphere_context}]\n\n"
-                        f"Present these results to the user warmly and conversationally."
+                        f"[SYSTEM: Share what the sphere shows — like a perceptive friend noticing patterns, "
+                        f"not a report. Do NOT repeat what you just said about their last answer. "
+                        f"Data for reference (don't recite it all): {sphere_context}]"
                     ),
                 })
 
