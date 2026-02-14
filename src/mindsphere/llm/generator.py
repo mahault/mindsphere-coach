@@ -21,8 +21,10 @@ from .client import MistralClient, MistralAPIError
 logger = logging.getLogger(__name__)
 
 
-# The model to use for conversation (needs web_search support)
-CONVERSATION_MODEL = "mistral-medium-latest"
+# Optional: separate model for conversation (e.g. a stronger model for responses).
+# Set via LLM_CONVERSATION_MODEL env var. Empty = use the default LLM_MODEL.
+import os
+CONVERSATION_MODEL = os.environ.get("LLM_CONVERSATION_MODEL", "")
 
 # Web search tool definition for Mistral
 # NOTE: web_search format varies by Mistral API version.
@@ -352,7 +354,7 @@ class CoachGenerator:
 
         # Log message structure for debugging
         roles = [m["role"] for m in messages]
-        logger.info(f"[CoachGenerator] Sending {len(messages)} messages to Mistral (roles: {roles[-5:]})")
+        logger.info(f"[CoachGenerator] Sending {len(messages)} messages to LLM (roles: {roles[-5:]})")
 
         # Detect duplicate user messages (bug diagnostic)
         user_msgs = [m["content"][:80] for m in messages if m["role"] == "user"]
@@ -373,12 +375,12 @@ class CoachGenerator:
                 temperature=0.7,
                 max_tokens=300,
                 tools=tools,
-                model_override=CONVERSATION_MODEL,
+                model_override=CONVERSATION_MODEL or None,
             )
             if response and response.strip():
-                logger.info(f"[CoachGenerator] Mistral responded ({len(response)} chars)")
+                logger.info(f"[CoachGenerator] LLM responded ({len(response)} chars)")
                 return response.strip()
-            logger.warning("[CoachGenerator] Empty response from Mistral")
+            logger.warning("[CoachGenerator] Empty response from LLM")
             return ""
         except Exception as e:
             logger.warning(f"[CoachGenerator] Exception: {e}")
@@ -422,7 +424,7 @@ class CoachGenerator:
             messages.append({"role": msg["role"], "content": msg["content"]})
         messages.append({"role": "user", "content": user_message})
 
-        logger.info(f"[CoachGenerator] Streaming {len(messages)} messages to Mistral")
+        logger.info(f"[CoachGenerator] Streaming {len(messages)} messages to LLM")
 
         try:
             collected = []
@@ -430,7 +432,7 @@ class CoachGenerator:
                 messages=messages,
                 temperature=0.7,
                 max_tokens=300,
-                model_override=CONVERSATION_MODEL,
+                model_override=CONVERSATION_MODEL or None,
             ):
                 collected.append(chunk)
                 yield chunk

@@ -31,37 +31,58 @@ class MistralAPIError(Exception):
 @dataclass
 class MistralClient:
     """
-    Thin HTTP wrapper for Mistral's /v1/chat/completions endpoint.
+    HTTP wrapper for OpenAI-compatible /v1/chat/completions endpoints.
 
-    Handles authentication, retries, and response parsing.
-    The classifier and generator use this as their backend.
+    Works with any provider: Mistral, Groq, Together, Gemini, etc.
+    Configure via environment variables:
+        LLM_API_KEY / MISTRAL_API_KEY — API key
+        LLM_BASE_URL — API base URL (default: Mistral)
+        LLM_MODEL — Default model name
     """
 
     api_key: str = ""
-    model: str = "mistral-small-latest"
-    base_url: str = "https://api.mistral.ai/v1"
+    model: str = ""
+    base_url: str = ""
     timeout: float = 30.0
     max_retries: int = 2
 
     def __post_init__(self):
+        # Load .env file into os.environ so all config is accessible
+        self._load_dotenv()
+        if not self.base_url:
+            self.base_url = os.environ.get(
+                "LLM_BASE_URL", "https://api.mistral.ai/v1"
+            )
+        if not self.model:
+            self.model = os.environ.get("LLM_MODEL", "mistral-small-latest")
         if not self.api_key:
             self.api_key = self._load_api_key()
 
-    def _load_api_key(self) -> str:
-        """Load API key from environment variable or .env file."""
-        key = os.environ.get("MISTRAL_API_KEY", "")
-        if key:
-            return key
-
+    def _load_dotenv(self) -> None:
+        """Load .env file into os.environ (only vars not already set)."""
         for parent in [Path.cwd()] + list(Path(__file__).resolve().parents):
             env_path = parent / ".env"
             if env_path.exists():
                 for line in env_path.read_text().splitlines():
                     line = line.strip()
-                    if line.startswith("MISTRAL_API_KEY=") and not line.startswith("#"):
-                        return line.split("=", 1)[1].strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, value = line.split("=", 1)
+                        key, value = key.strip(), value.strip()
+                        if key and key not in os.environ:
+                            os.environ[key] = value
+                break  # only load the first .env found
 
-        raise MistralAPIError(401, "No MISTRAL_API_KEY found in env or .env file")
+    def _load_api_key(self) -> str:
+        """Load API key from environment variable."""
+        # Check generic LLM_API_KEY first, then legacy MISTRAL_API_KEY
+        for env_var in ("LLM_API_KEY", "MISTRAL_API_KEY"):
+            key = os.environ.get(env_var, "")
+            if key:
+                return key
+
+        raise MistralAPIError(401, "No LLM_API_KEY or MISTRAL_API_KEY found in env or .env file")
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -123,14 +144,11 @@ class MistralClient:
                 if resp.status_code in (400, 401, 403, 404):
                     raise MistralAPIError(resp.status_code, resp.text)
 
-                # Rate limit: respect Retry-After header if present
+                # Rate limit: fail fast so callers can use their fallback
                 if resp.status_code == 429:
-                    retry_after = resp.headers.get("Retry-After")
-                    wait = float(retry_after) if retry_after else (2 ** attempt + 1)
-                    logger.warning(f"[MistralClient] Rate limited (429), waiting {wait:.0f}s")
-                    if attempt < self.max_retries:
-                        time.sleep(wait)
-                        continue
+                    retry_after = resp.headers.get("Retry-After", "?")
+                    logger.warning(f"[LLMClient] Rate limited (429), Retry-After={retry_after}s — failing fast")
+                    raise MistralAPIError(429, f"Rate limited (Retry-After: {retry_after}s)")
 
                 last_error = MistralAPIError(resp.status_code, resp.text)
 

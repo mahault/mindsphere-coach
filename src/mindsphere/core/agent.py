@@ -164,7 +164,7 @@ class CoachingAgent:
                 client = MistralClient()
                 self._generator = CoachGenerator(client=client)
                 if self._generator.is_available:
-                    logger.info("LLM generator available — using Mistral for conversation")
+                    logger.info(f"LLM generator available — using {client.base_url} ({client.model})")
                 else:
                     logger.warning("LLM generator created but not available (no API key?) — using template responses")
                     self._generator = None
@@ -1074,12 +1074,12 @@ class CoachingAgent:
                     messages=messages,
                     temperature=0.7,
                     max_tokens=80,  # Keep acks short
-                    model_override="mistral-medium-latest",
+                    model_override=None,  # uses LLM_MODEL default
                 )
                 if response and response.strip():
                     logger.info(f"[LLM] Calibration ack: '{response.strip()[:60]}...'")
                     return response.strip()
-                logger.warning("[LLM] Empty calibration ack from Mistral")
+                logger.warning("[LLM] Empty calibration ack from LLM")
             except Exception as e:
                 logger.warning(f"[LLM] Calibration ack failed: {e}")
         else:
@@ -2093,12 +2093,12 @@ class CoachingAgent:
                     messages=messages,
                     temperature=0.7,
                     max_tokens=300,
-                    model_override="mistral-medium-latest",
+                    model_override=None,  # uses LLM_MODEL default
                 )
                 if response and response.strip():
                     logger.info(f"[LLM] Sphere commentary generated ({len(response)} chars)")
                     return response.strip()
-                logger.warning("[LLM] Empty sphere commentary from Mistral")
+                logger.warning("[LLM] Empty sphere commentary from LLM")
             except Exception as e:
                 logger.warning(f"[LLM] Sphere commentary failed: {e}")
 
