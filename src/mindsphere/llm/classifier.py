@@ -8,7 +8,10 @@ Three classification modes: MC answers, free text, and user choices.
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from .client import MistralClient, MistralAPIError
 
@@ -200,12 +203,31 @@ class SphereClassifier:
 
         Returns valence (0-4) and arousal (0-4) indices plus emotion label.
         These become formal POMDP observations for the emotional state model.
+
+        Falls back to heuristic classification if LLM fails, rather than
+        returning neutral defaults (which would make the system emotionally blind).
         """
         prompt = EMOTION_CLASSIFY_PROMPT.format(
             answer=answer_text,
             context=context,
         )
-        result = self._call_llm(prompt, self.DEFAULT_EMOTION_RESULT)
+        try:
+            response = self.client.chat_completion(
+                messages=[
+                    {"role": "system", "content": CLASSIFIER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.05,
+                max_tokens=256,
+                response_format={"type": "json_object"},
+            )
+            result = self._validate_and_repair(
+                json.loads(response), self.DEFAULT_EMOTION_RESULT
+            )
+        except Exception as e:
+            # LLM failed — fall back to heuristic instead of neutral defaults
+            logger.warning(f"[SphereClassifier] Emotion LLM failed ({type(e).__name__}), using heuristic")
+            result = self.classify_emotion_heuristic(answer_text)
 
         # Convert string levels to indices
         result["valence_idx"] = self.VALENCE_INDEX_MAP.get(
@@ -234,13 +256,17 @@ class SphereClassifier:
             "hopeless", "lost", "confused", "scared", "tired",
             "burned out", "overwhelmed", "sad", "angry", "annoyed",
             "hate", "terrible", "awful", "bad", "depressed",
-            "bored", "boring", "meh", "ugh",
+            "bored", "boring", "meh", "ugh", "down", "horrible",
+            "pointless", "miserable", "give up", "sucks", "worst",
+            "painful", "dread", "fail", "broken", "nothing works",
         ]
         positive_words = [
             "good", "great", "happy", "excited", "curious",
             "interesting", "love", "amazing", "better", "hopeful",
             "motivated", "ready", "clear", "peaceful", "calm",
-            "relaxed", "grateful", "proud", "confident",
+            "relaxed", "grateful", "proud", "confident", "wonderful",
+            "fantastic", "awesome", "brilliant", "beautiful",
+            "progress", "getting it", "starting to",
         ]
 
         neg_count = sum(1 for w in negative_words if w in lower)
@@ -261,11 +287,13 @@ class SphereClassifier:
         high_arousal_words = [
             "!", "stressed", "anxious", "excited", "angry",
             "can't believe", "urgent", "help", "panic", "scared",
-            "amazing", "overwhelmed",
+            "amazing", "overwhelmed", "furious", "thrilled",
+            "panicking", "intense", "?!", "!!",
         ]
         low_arousal_words = [
             "bored", "tired", "calm", "peaceful", "relaxed",
             "meh", "whatever", "ok", "fine", "sleepy",
+            "hopeless", "pointless", "numb",
         ]
 
         high_count = sum(1 for w in high_arousal_words if w in lower)
@@ -331,7 +359,10 @@ class SphereClassifier:
                 response_format={"type": "json_object"},
             )
             return self._validate_and_repair(json.loads(response), default)
-        except (MistralAPIError, json.JSONDecodeError, KeyError):
+        except Exception as e:
+            logger.warning(
+                f"[SphereClassifier] LLM call failed ({type(e).__name__}: {e}), using defaults"
+            )
             return default.copy()
 
     def _validate_and_repair(

@@ -123,11 +123,22 @@ class MistralClient:
                 if resp.status_code in (400, 401, 403, 404):
                     raise MistralAPIError(resp.status_code, resp.text)
 
+                # Rate limit: respect Retry-After header if present
+                if resp.status_code == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    wait = float(retry_after) if retry_after else (2 ** attempt + 1)
+                    logger.warning(f"[MistralClient] Rate limited (429), waiting {wait:.0f}s")
+                    if attempt < self.max_retries:
+                        time.sleep(wait)
+                        continue
+
                 last_error = MistralAPIError(resp.status_code, resp.text)
 
             except requests.exceptions.Timeout:
+                logger.warning(f"[MistralClient] Request timed out (attempt {attempt + 1}/{self.max_retries + 1})")
                 last_error = MistralAPIError(408, "Request timed out")
             except requests.exceptions.ConnectionError as e:
+                logger.warning(f"[MistralClient] Connection error: {e}")
                 last_error = MistralAPIError(0, f"Connection error: {e}")
 
             if attempt < self.max_retries:

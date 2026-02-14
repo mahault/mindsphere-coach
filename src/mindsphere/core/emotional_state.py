@@ -457,15 +457,18 @@ class EmotionEngine:
         arousal_map = [0.1, 0.3, 0.5, 0.7, 0.9]
 
         v = valence_map[min(valence_idx, 4)]
-        a = arousal_map[min(arousal_idx, 4)]
+        a_raw = arousal_map[min(arousal_idx, 4)]
 
-        state = EmotionalState(arousal=a, valence=v)
+        # Center arousal for circumplex mapping: [0.1,0.9] → [-0.8,0.8]
+        # This ensures emotions map to all 4 quadrants, not just the top half.
+        a_centered = (a_raw - 0.5) * 2
+        state = EmotionalState(arousal=a_centered, valence=v)
 
         observation = EmotionalObservation(
             observed_valence_idx=valence_idx,
             observed_arousal_idx=arousal_idx,
             observed_valence=v,
-            observed_arousal=a,
+            observed_arousal=a_raw,
             observed_emotion=state.emotion_label(),
             raw_classification=raw_classification or {},
         )
@@ -529,8 +532,10 @@ class EmotionEngine:
         self.errors.append(error)
 
         # --- Record emotional state ---
+        # Center arousal for circumplex mapping: raw [0.1,0.9] → centered [-0.8,0.8]
+        a_centered = (observation.observed_arousal - 0.5) * 2
         state = EmotionalState(
-            arousal=observation.observed_arousal,
+            arousal=a_centered,
             valence=observation.observed_valence,
             timestep=len(self.states),
         )

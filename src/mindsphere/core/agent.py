@@ -653,22 +653,28 @@ class CoachingAgent:
             "hopeless", "lost", "confused", "scared", "tired",
             "burned out", "overwhelmed", "sad", "angry", "annoyed",
             "hate", "terrible", "awful", "bad", "depressed",
-            "bored", "boring", "meh", "ugh",
+            "bored", "boring", "meh", "ugh", "down", "horrible",
+            "pointless", "miserable", "give up", "sucks", "worst",
+            "painful", "dread", "fail", "broken", "nothing works",
         ]
         pos_words = [
             "good", "great", "happy", "excited", "curious",
             "interesting", "love", "amazing", "better", "hopeful",
             "motivated", "ready", "clear", "peaceful", "calm",
-            "relaxed", "grateful", "proud", "confident",
+            "relaxed", "grateful", "proud", "confident", "wonderful",
+            "fantastic", "awesome", "brilliant", "beautiful",
+            "progress", "getting it", "starting to",
         ]
         high_arousal = [
             "!", "stressed", "anxious", "excited", "angry",
             "can't believe", "urgent", "help", "panic", "scared",
-            "amazing", "overwhelmed",
+            "amazing", "overwhelmed", "furious", "thrilled",
+            "panicking", "intense", "?!", "!!",
         ]
         low_arousal = [
             "bored", "tired", "calm", "peaceful", "relaxed",
             "meh", "whatever", "ok", "fine", "sleepy",
+            "hopeless", "pointless", "numb",
         ]
 
         neg_c = sum(1 for w in neg_words if w in lower)

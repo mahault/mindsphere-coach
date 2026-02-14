@@ -191,11 +191,8 @@ async function sendMessage(content, extra = {}) {
                         msgDiv.textContent += data.text || '';
                         els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
                     } else if (eventType === 'done') {
-                        // If no tokens were received, check metadata for message
-                        if (!msgDiv && metadata && metadata.message) {
-                            typingDiv.remove();
-                            addMessage('assistant', metadata.message);
-                        } else if (!msgDiv) {
+                        // Remove typing indicator if still present
+                        if (!msgDiv && typingDiv.parentNode) {
                             typingDiv.remove();
                         }
                     }
@@ -233,13 +230,18 @@ function handleStreamMetadata(data) {
     state.phase = data.phase || state.phase;
     updatePhaseUI(data.phase, data.progress);
 
+    // Show message if included in metadata (calibration sends full message here)
+    if (data.message) {
+        addMessage('assistant', data.message);
+    }
+
     // Show sphere ONLY after calibration is done
     if (data.sphere_data && data.phase !== 'calibration') {
         state.sphereData = data.sphere_data;
         renderSphere(data.sphere_data);
     }
 
-    // Show question if present (calibration phase)
+    // Show question if present (calibration phase) — AFTER message so order is correct
     if (data.question) {
         showQuestion(data.question);
     }
@@ -613,9 +615,7 @@ function renderCircumplex(emotionalState) {
     const container = document.getElementById('circumplex-chart');
     if (!container) return;
 
-    // Backend arousal is [0.1, 0.9]. Center it for display: (a - 0.5) * 2 → [-0.8, 0.8]
-    const centerArousal = (a) => (a - 0.5) * 2;
-
+    // Backend arousal is now centered [-0.8, 0.8] — use directly
     const traces = [];
 
     // Trajectory dots (fading opacity)
@@ -626,7 +626,7 @@ function renderCircumplex(emotionalState) {
             type: 'scatter',
             mode: 'lines+markers',
             x: traj.map(s => s.valence || 0),
-            y: traj.map(s => centerArousal(s.arousal || 0.5)),
+            y: traj.map(s => s.arousal || 0),
             marker: {
                 color: traj.map((_, i) => `rgba(74, 144, 217, ${0.2 + 0.15 * i})`),
                 size: traj.map((_, i) => 6 + i),
@@ -641,7 +641,7 @@ function renderCircumplex(emotionalState) {
     const current = emotionalState.current;
     if (current) {
         const v = current.valence || 0;
-        const a = centerArousal(current.arousal || 0.5);
+        const a = current.arousal || 0;
         const emotion = current.emotion || current.emotion_label || '?';
         // Color by quadrant
         let dotColor = '#4A90D9';
