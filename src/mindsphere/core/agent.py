@@ -1174,10 +1174,35 @@ class CoachingAgent:
             self._track_conversation("assistant", result.get("message", ""))
             return result
 
+        # === EMOTIONAL INFERENCE (runs every turn) ===
+        emotional_data = self._run_emotional_inference(user_text)
+        cog_load = self._assess_cognitive_load(user_text, emotional_data=emotional_data)
+
+        # Update cognitive model
+        self._update_user_model_from_text(user_text)
+
+        # === Companion gate: be present when user needs it ===
+        if cog_load["coaching_readiness"] == "not_ready":
+            logger.info(f"[Planning] Companion mode (signals={cog_load['signals']})")
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
+            self._track_conversation("user", user_text)
+            response = llm_response or self._generate_companion_response(user_text)
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_PLANNING,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": {"selected_action": "companion_chat", "override": "not_coaching_ready"},
+                "is_complete": False,
+            }
+
         # Otherwise it's free text — have a conversation
         # NOTE: _respond_to_planning_chat may call _llm_generate,
         # so track user message AFTER to avoid duplicate user messages
         result = self._respond_to_planning_chat(user_text)
+        result["emotional_state"] = emotional_data
         self._track_conversation("user", user_text)
         self._track_conversation("assistant", result.get("message", ""))
         return result
@@ -1197,10 +1222,32 @@ class CoachingAgent:
             self._track_conversation("assistant", result.get("message", ""))
             return result
 
+        # === EMOTIONAL INFERENCE (runs every turn) ===
+        emotional_data = self._run_emotional_inference(user_text)
+        cog_load = self._assess_cognitive_load(user_text, emotional_data=emotional_data)
+
+        # === Companion gate: be present when user needs it ===
+        if cog_load["coaching_readiness"] == "not_ready":
+            logger.info(f"[Update] Companion mode (signals={cog_load['signals']})")
+            llm_response = self._llm_generate(user_text, cognitive_load=cog_load)
+            self._track_conversation("user", user_text)
+            response = llm_response or self._generate_companion_response(user_text)
+            self._track_conversation("assistant", response)
+            return {
+                "phase": PHASE_UPDATE,
+                "message": response,
+                "sphere_data": self.get_sphere_data(),
+                "belief_summary": self.get_belief_summary(),
+                "emotional_state": emotional_data,
+                "efe_info": {"selected_action": "companion_chat", "override": "not_coaching_ready"},
+                "is_complete": False,
+            }
+
         # Free text during update phase
         # NOTE: _respond_to_update_chat calls _llm_generate,
         # so track user message AFTER to avoid duplicate user messages
         result = self._respond_to_update_chat(user_text)
+        result["emotional_state"] = emotional_data
         self._track_conversation("user", user_text)
         self._track_conversation("assistant", result.get("message", ""))
         return result
@@ -2120,9 +2167,6 @@ class CoachingAgent:
     def _respond_to_planning_chat(self, user_text: str) -> Dict[str, Any]:
         """Respond to free-text during the planning phase."""
         lower = user_text.lower()
-
-        # Update cognitive model
-        self._update_user_model_from_text(user_text)
 
         # Detect implicit acceptance or rejection
         positive = any(w in lower for w in [

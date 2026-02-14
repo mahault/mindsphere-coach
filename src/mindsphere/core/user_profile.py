@@ -442,8 +442,11 @@ class UserProfile:
                     new_facts.extend(llm_result["facts"])
                     causal_links.extend(llm_result.get("causal_links", []))
                     progress_signals.extend(llm_result.get("progress_signals", []))
+                    logger.info(f"[Profile] LLM extracted {len(llm_result['facts'])} facts from: '{user_text[:50]}...'")
+                else:
+                    logger.info(f"[Profile] LLM returned no facts for: '{user_text[:50]}...'")
             except Exception as e:
-                logger.debug(f"LLM profile extraction failed: {e}")
+                logger.warning(f"LLM profile extraction error: {e}")
 
         # FALLBACK: Heuristic extraction (when LLM unavailable)
         if not new_facts:
@@ -625,7 +628,7 @@ class UserProfile:
             }
 
         except Exception as e:
-            logger.debug(f"LLM profile extraction parse error: {e}")
+            logger.warning(f"LLM profile extraction failed: {e}")
             return None
 
     def _update_bayes_net(
@@ -902,6 +905,69 @@ class UserProfile:
                     related_skills=["self_trust"],
                 ))
                 break
+
+        # --- Habits / behaviors (common in coaching) ---
+        habit_patterns = [
+            ("watch too much", "challenge", "negative", "medium", ["focus", "follow_through"]),
+            ("scroll too much", "challenge", "negative", "medium", ["focus"]),
+            ("spend too much time", "challenge", "negative", "medium", ["focus", "consistency"]),
+            ("can't stop", "challenge", "negative", "medium", ["emotional_reg", "follow_through"]),
+            ("keep doing", "challenge", "negative", "medium", ["follow_through"]),
+            ("always end up", "challenge", "negative", "medium", ["consistency"]),
+            ("procrastinat", "challenge", "negative", "high", ["follow_through", "focus"]),
+            ("distract", "challenge", "negative", "medium", ["focus"]),
+            ("addicted to", "challenge", "negative", "high", ["emotional_reg", "focus"]),
+            ("waste time", "challenge", "negative", "medium", ["focus", "task_clarity"]),
+        ]
+        for pattern, cat, valence, sig, skills in habit_patterns:
+            if pattern in lower:
+                facts.append(ProfileFact(
+                    content=user_text.strip()[:120],
+                    category=cat, turn=turn,
+                    significance=sig, valence=valence,
+                    related_skills=skills,
+                ))
+                break
+
+        # --- Emotional statements ---
+        emotion_patterns = [
+            ("i am so sad", "negative", "high", ["emotional_reg"]),
+            ("i'm so sad", "negative", "high", ["emotional_reg"]),
+            ("i feel sad", "negative", "high", ["emotional_reg"]),
+            ("i feel angry", "negative", "high", ["emotional_reg"]),
+            ("i'm angry", "negative", "high", ["emotional_reg"]),
+            ("i hate", "negative", "high", ["emotional_reg"]),
+            ("i'm stressed", "negative", "high", ["emotional_reg"]),
+            ("i'm anxious", "negative", "high", ["emotional_reg"]),
+            ("i feel lost", "negative", "high", ["emotional_reg", "self_trust"]),
+            ("i'm depressed", "negative", "high", ["emotional_reg"]),
+            ("i feel hopeless", "negative", "high", ["emotional_reg", "self_trust"]),
+            ("i'm overwhelmed", "negative", "high", ["emotional_reg", "focus"]),
+            ("i feel great", "positive", "medium", ["emotional_reg"]),
+            ("i'm excited", "positive", "medium", ["emotional_reg"]),
+            ("i feel good", "positive", "medium", ["emotional_reg"]),
+        ]
+        for pattern, valence, sig, skills in emotion_patterns:
+            if pattern in lower:
+                facts.append(ProfileFact(
+                    content=user_text.strip()[:120],
+                    category=CATEGORY_LIFE_EVENT, turn=turn,
+                    significance=sig, valence=valence,
+                    related_skills=skills,
+                ))
+                break
+
+        # --- Social activities / personal experiences ---
+        if any(w in lower for w in [
+            "stayed out", "went out", "hung out", "met up",
+            "friends", "party", "social", "gathering",
+        ]):
+            facts.append(ProfileFact(
+                content=user_text.strip()[:120],
+                category=CATEGORY_CONTEXT, turn=turn,
+                significance="medium", valence="neutral",
+                related_skills=["social_courage"],
+            ))
 
         return facts
 
