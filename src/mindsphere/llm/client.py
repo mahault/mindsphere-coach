@@ -52,9 +52,9 @@ class MistralClient:
         if not self.base_url:
             self.base_url = os.environ.get(
                 "LLM_BASE_URL", "https://api.mistral.ai/v1"
-            )
+            ).strip().rstrip("/")
         if not self.model:
-            self.model = os.environ.get("LLM_MODEL", "mistral-small-latest")
+            self.model = os.environ.get("LLM_MODEL", "mistral-small-latest").strip()
         if not self.api_key:
             self.api_key = self._load_api_key()
 
@@ -76,13 +76,13 @@ class MistralClient:
 
     def _load_api_key(self) -> str:
         """Load API key from environment variable."""
-        # Check generic LLM_API_KEY first, then legacy MISTRAL_API_KEY
-        for env_var in ("LLM_API_KEY", "MISTRAL_API_KEY"):
-            key = os.environ.get(env_var, "")
+        # Check generic LLM_API_KEY first, then provider-specific keys
+        for env_var in ("LLM_API_KEY", "GROQ_API_KEY", "MISTRAL_API_KEY"):
+            key = os.environ.get(env_var, "").strip()
             if key:
                 return key
 
-        raise MistralAPIError(401, "No LLM_API_KEY or MISTRAL_API_KEY found in env or .env file")
+        raise MistralAPIError(401, "No LLM_API_KEY, GROQ_API_KEY, or MISTRAL_API_KEY found in env or .env file")
 
     def _headers(self) -> Dict[str, str]:
         return {
