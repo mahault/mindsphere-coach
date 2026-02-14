@@ -137,77 +137,151 @@ async function sendMessage(content, extra = {}) {
     els.chatMessages.appendChild(typingDiv);
     els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
 
-    try {
-        const body = {
-            user_message: content,
-            message_type: extra.message_type || 'text',
-            ...extra,
-        };
+    const body = {
+        user_message: content,
+        message_type: extra.message_type || 'text',
+        ...extra,
+    };
 
-        const resp = await fetch(`/api/session/${state.sessionId}/step`, {
+    // Use streaming endpoint for all phases
+    try {
+        const resp = await fetch(`/api/session/${state.sessionId}/step-stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
         });
-        const data = await resp.json();
 
-        // Remove typing indicator
-        typingDiv.remove();
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let msgDiv = null;
+        let metadata = null;
 
-        // Process response
-        if (data.message) {
-            addMessage('assistant', data.message);
-        }
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-        state.phase = data.phase;
-        updatePhaseUI(data.phase, data.progress);
+            // Parse SSE events from buffer
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
 
-        // Show sphere ONLY after calibration is done
-        if (data.sphere_data && data.phase !== 'calibration') {
-            state.sphereData = data.sphere_data;
-            renderSphere(data.sphere_data);
-        }
+            let eventType = null;
+            for (const line of lines) {
+                if (line.startsWith('event: ')) {
+                    eventType = line.slice(7).trim();
+                } else if (line.startsWith('data: ')) {
+                    const dataStr = line.slice(6);
+                    let data;
+                    try { data = JSON.parse(dataStr); } catch { continue; }
 
-        // Show question if present (calibration phase)
-        if (data.question) {
-            showQuestion(data.question);
-            return;  // showQuestion handles its own input visibility
-        }
-
-        // Show counterfactual + intervention (planning/update phase)
-        if (data.counterfactual) renderCounterfactual(data.counterfactual);
-        if (data.intervention) renderIntervention(data.intervention);
-
-        // Refresh profile panel after calibration
-        if (data.phase !== 'calibration') {
-            refreshProfilePanel();
-        }
-
-        // After calibration: always show text input for chatting
-        if (data.phase !== 'calibration') {
-            els.chatInputArea.classList.remove('hidden');
-
-            // Only show choice buttons when there's an actual intervention to respond to
-            if ((data.phase === 'planning' || data.phase === 'update') && !data.is_complete && data.intervention) {
-                els.choiceButtons.classList.remove('hidden');
-                els.chatInput.placeholder = 'Or type your thoughts...';
-            } else {
-                els.chatInput.placeholder = 'Type your response...';
+                    if (eventType === 'metadata') {
+                        metadata = data;
+                        // Process metadata immediately (phase, sphere, question, etc.)
+                        handleStreamMetadata(metadata);
+                    } else if (eventType === 'token') {
+                        // First token: replace typing indicator with message div
+                        if (!msgDiv) {
+                            typingDiv.remove();
+                            msgDiv = document.createElement('div');
+                            msgDiv.className = 'message assistant';
+                            msgDiv.textContent = '';
+                            els.chatMessages.appendChild(msgDiv);
+                        }
+                        msgDiv.textContent += data.text || '';
+                        els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+                    } else if (eventType === 'done') {
+                        // If no tokens were received, check metadata for message
+                        if (!msgDiv && metadata && metadata.message) {
+                            typingDiv.remove();
+                            addMessage('assistant', metadata.message);
+                        } else if (!msgDiv) {
+                            typingDiv.remove();
+                        }
+                    }
+                }
             }
-
-            els.chatInput.focus();
         }
 
-        if (data.is_complete) {
-            els.choiceButtons.classList.add('hidden');
-            els.safetyNotice.classList.remove('hidden');
-            els.chatInput.placeholder = 'Session complete — type to continue chatting...';
-        }
+        // Finalize: apply post-stream UI updates
+        if (typingDiv.parentNode) typingDiv.remove();
+        handleStreamFinalize(metadata);
 
     } catch (err) {
-        typingDiv.remove();
-        addMessage('system', 'Failed to send message.');
+        if (typingDiv.parentNode) typingDiv.remove();
+        // Fallback: try non-streaming endpoint
+        try {
+            const resp = await fetch(`/api/session/${state.sessionId}/step`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            const data = await resp.json();
+            if (data.message) addMessage('assistant', data.message);
+            handleStreamMetadata(data);
+            handleStreamFinalize(data);
+        } catch {
+            addMessage('system', 'Failed to send message.');
+            els.chatInputArea.classList.remove('hidden');
+        }
+    }
+}
+
+function handleStreamMetadata(data) {
+    if (!data) return;
+
+    state.phase = data.phase || state.phase;
+    updatePhaseUI(data.phase, data.progress);
+
+    // Show sphere ONLY after calibration is done
+    if (data.sphere_data && data.phase !== 'calibration') {
+        state.sphereData = data.sphere_data;
+        renderSphere(data.sphere_data);
+    }
+
+    // Show question if present (calibration phase)
+    if (data.question) {
+        showQuestion(data.question);
+    }
+
+    // Show counterfactual + intervention (planning/update phase)
+    if (data.counterfactual) renderCounterfactual(data.counterfactual);
+    if (data.intervention) renderIntervention(data.intervention);
+}
+
+function handleStreamFinalize(data) {
+    if (!data) {
         els.chatInputArea.classList.remove('hidden');
+        return;
+    }
+
+    // If there's a question, showQuestion handles input visibility
+    if (data.question) return;
+
+    // Refresh profile panel after calibration
+    if (data.phase !== 'calibration') {
+        refreshProfilePanel();
+    }
+
+    // After calibration: always show text input for chatting
+    if (data.phase !== 'calibration') {
+        els.chatInputArea.classList.remove('hidden');
+
+        // Only show choice buttons when there's an actual intervention to respond to
+        if ((data.phase === 'planning' || data.phase === 'update') && !data.is_complete && data.intervention) {
+            els.choiceButtons.classList.remove('hidden');
+            els.chatInput.placeholder = 'Or type your thoughts...';
+        } else {
+            els.chatInput.placeholder = 'Type your response...';
+        }
+
+        els.chatInput.focus();
+    }
+
+    if (data.is_complete) {
+        els.choiceButtons.classList.add('hidden');
+        els.safetyNotice.classList.remove('hidden');
+        els.chatInput.placeholder = 'Session complete — type to continue chatting...';
     }
 }
 
@@ -539,9 +613,11 @@ function renderCircumplex(emotionalState) {
     const container = document.getElementById('circumplex-chart');
     if (!container) return;
 
+    // Backend arousal is [0.1, 0.9]. Center it for display: (a - 0.5) * 2 → [-0.8, 0.8]
+    const centerArousal = (a) => (a - 0.5) * 2;
+
     const traces = [];
 
-    // Quadrant background annotations will be added via layout
     // Trajectory dots (fading opacity)
     const trajectory = emotionalState.trajectory || [];
     if (trajectory.length > 0) {
@@ -550,7 +626,7 @@ function renderCircumplex(emotionalState) {
             type: 'scatter',
             mode: 'lines+markers',
             x: traj.map(s => s.valence || 0),
-            y: traj.map(s => s.arousal || 0),
+            y: traj.map(s => centerArousal(s.arousal || 0.5)),
             marker: {
                 color: traj.map((_, i) => `rgba(74, 144, 217, ${0.2 + 0.15 * i})`),
                 size: traj.map((_, i) => 6 + i),
@@ -565,7 +641,7 @@ function renderCircumplex(emotionalState) {
     const current = emotionalState.current;
     if (current) {
         const v = current.valence || 0;
-        const a = current.arousal || 0;
+        const a = centerArousal(current.arousal || 0.5);
         const emotion = current.emotion || current.emotion_label || '?';
         // Color by quadrant
         let dotColor = '#4A90D9';

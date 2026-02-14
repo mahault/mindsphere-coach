@@ -80,14 +80,40 @@ The core innovation: **the agent doesn't just recommend; it infers why a recomme
   - Emotional state + prediction errors injected into LLM system prompt
   - Emotional trajectory tracking (last 5 states, predictions, errors)
 
+- **User Profile Visualization Panel** (Plotly)
+  - Stacked horizontal bar distributions for all 8 skill beliefs
+  - Score delta arrows (up/down indicators on skill labels)
+  - Circumplex emotional state chart with trajectory and quadrant coloring
+  - ToM user type profile (7 dimensions, color-coded by sensitivity)
+  - Causal dependency graph (directed graph with bottleneck highlighting)
+  - Bayesian network of profile facts (observed → inferred causal graph)
+
+- **Profile Fact Extraction**
+  - LLM-based extraction: habits, challenges, preferences, emotional patterns
+  - Heuristic fallback patterns: procrastination, social activities, emotions
+  - Bayesian network: facts as nodes, causal edges with probabilistic inference
+  - Profile context injected into LLM system prompt every turn
+
+- **Companion Gate (All Phases)**
+  - Emotional inference + cognitive load check every post-calibration turn
+  - Companion mode triggers on distress, off-topic, deflection, disengagement
+  - Active in visualization, planning, update, and coaching phases
+  - Overrides EFE action selection when user is not coaching-ready
+
+- **LLM Response Streaming (SSE)**
+  - Server-Sent Events endpoint for token-by-token delivery
+  - Streaming through full stack: MistralClient → CoachGenerator → Agent → API → Frontend
+  - Frontend renders tokens as they arrive (no waiting for full response)
+  - Fallback to non-streaming endpoint if SSE fails
+
 - **Web Interface**
-  - FastAPI backend with REST endpoints
+  - FastAPI backend with REST + SSE streaming endpoints
   - Interactive Plotly radar chart ("dented sphere")
   - Chat UI with MC buttons, choice buttons, and persistent text input
   - Counterfactual side-by-side display
   - Live belief/profile panel with "Model Confidence" explanation
   - Empathy dial slider
-  - Typing indicator during processing
+  - Token-by-token streaming display
 
 - **Safety Features**
   - Autonomy protection defaults (empathy=0.5)
@@ -99,7 +125,7 @@ The core innovation: **the agent doesn't just recommend; it infers why a recomme
 - Sphere generation: < 1 second
 - Intervention proposal with counterfactual: < 2 seconds
 - Full demo: 5-8 minutes
-- 57+ tests passing across 6 test modules
+- 134+ tests passing across 7 test modules
 
 ---
 

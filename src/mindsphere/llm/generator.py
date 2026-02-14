@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from .client import MistralClient, MistralAPIError
 
@@ -383,3 +383,58 @@ class CoachGenerator:
         except Exception as e:
             logger.warning(f"[CoachGenerator] Exception: {e}")
             return ""  # Fall back to templates
+
+    def generate_stream(
+        self,
+        user_message: str,
+        conversation_history: List[Dict[str, str]],
+        phase: str,
+        belief_summary: Optional[Dict[str, Any]] = None,
+        tom_summary: Optional[Dict[str, float]] = None,
+        cognitive_load: Optional[Dict[str, Any]] = None,
+        target_skill: Optional[str] = None,
+        current_intervention: Optional[Dict[str, Any]] = None,
+        accepted_interventions: Optional[List[Dict]] = None,
+        profile_section: Optional[str] = None,
+    ) -> Generator[str, None, None]:
+        """
+        Stream a conversational response, yielding text chunks.
+
+        Same context preparation as generate() but uses the streaming API.
+        Yields empty if LLM unavailable (caller should fall back to templates).
+        """
+        if not self.is_available:
+            return
+
+        system_prompt = build_system_prompt(
+            phase=phase,
+            belief_summary=belief_summary,
+            tom_summary=tom_summary,
+            cognitive_load=cognitive_load,
+            target_skill=target_skill,
+            current_intervention=current_intervention,
+            accepted_interventions=accepted_interventions,
+            profile_section=profile_section,
+        )
+
+        messages = [{"role": "system", "content": system_prompt}]
+        for msg in conversation_history[-10:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+        messages.append({"role": "user", "content": user_message})
+
+        logger.info(f"[CoachGenerator] Streaming {len(messages)} messages to Mistral")
+
+        try:
+            collected = []
+            for chunk in self.client.chat_completion_stream(
+                messages=messages,
+                temperature=0.7,
+                max_tokens=300,
+                model_override=CONVERSATION_MODEL,
+            ):
+                collected.append(chunk)
+                yield chunk
+            full = "".join(collected)
+            logger.info(f"[CoachGenerator] Streamed {len(full)} chars")
+        except Exception as e:
+            logger.warning(f"[CoachGenerator] Stream exception: {e}")

@@ -4,9 +4,12 @@ REST API routes for MindSphere Coach.
 
 from __future__ import annotations
 
+import json
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException
+from starlette.responses import StreamingResponse
 
 from .schemas import (
     StartSessionRequest,
@@ -18,6 +21,8 @@ from .schemas import (
     QuestionData,
 )
 from .session import SessionManager
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -128,6 +133,52 @@ async def step(session_id: str, request: StepRequest):
         dependency_explanation=result.get("dependency_explanation"),
         progress=result.get("progress"),
         is_complete=result.get("is_complete", False),
+    )
+
+
+@router.post("/session/{session_id}/step-stream")
+async def step_stream(session_id: str, request: StepRequest):
+    """SSE streaming version of step(). Streams LLM tokens as they arrive."""
+    sm = get_session_manager()
+    if not sm.session_exists(session_id):
+        raise HTTPException(404, f"Session {session_id} not found")
+
+    agent = sm.get_agent(session_id)
+    if agent is None:
+        raise HTTPException(500, "Agent not found for session")
+
+    user_input = {
+        "answer": request.user_message,
+        "message_type": request.message_type,
+    }
+    if request.answer_index is not None:
+        user_input["answer_index"] = request.answer_index
+    if request.choice is not None:
+        user_input["choice"] = request.choice
+
+    sm.add_to_history(session_id, "user", request.user_message)
+
+    def event_generator():
+        full_message = []
+        for event in agent.step_stream(user_input):
+            event_type = event.get("event", "token")
+            data = event.get("data", {})
+            payload = json.dumps(data, default=str)
+            yield f"event: {event_type}\ndata: {payload}\n\n"
+            if event_type == "token":
+                full_message.append(data.get("text", ""))
+        # Store the full assembled message in session history
+        msg = "".join(full_message)
+        if msg:
+            sm.add_to_history(session_id, "assistant", msg)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

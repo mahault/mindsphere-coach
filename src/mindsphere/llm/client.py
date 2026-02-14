@@ -7,13 +7,17 @@ Handles authentication, retries, and response parsing.
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class MistralAPIError(Exception):
@@ -130,6 +134,55 @@ class MistralClient:
                 time.sleep(2 ** attempt)
 
         raise last_error  # type: ignore
+
+    def chat_completion_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float = 0.7,
+        max_tokens: int = 300,
+        model_override: Optional[str] = None,
+    ) -> Generator[str, None, None]:
+        """
+        Stream chat completion, yielding text chunks as they arrive.
+
+        Uses Mistral's SSE streaming API (stream=true).
+        Each yield is a string fragment of the assistant's response.
+        """
+        url = f"{self.base_url}/chat/completions"
+        body: Dict[str, Any] = {
+            "model": model_override or self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+
+        try:
+            resp = requests.post(
+                url,
+                headers=self._headers(),
+                json=body,
+                timeout=self.timeout,
+                stream=True,
+            )
+            resp.raise_for_status()
+
+            for line in resp.iter_lines(decode_unicode=True):
+                if not line or not line.startswith("data: "):
+                    continue
+                data = line[6:]
+                if data.strip() == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                    content = chunk["choices"][0]["delta"].get("content", "")
+                    if content:
+                        yield content
+                except (json.JSONDecodeError, KeyError, IndexError):
+                    continue
+
+        except Exception as e:
+            logger.warning(f"[MistralClient] Streaming error: {e}")
 
     @property
     def is_available(self) -> bool:

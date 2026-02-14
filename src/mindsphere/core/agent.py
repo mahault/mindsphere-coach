@@ -207,6 +207,36 @@ class CoachingAgent:
             logger.info(f"[LLM] Generator is None — using template fallback (phase={self.phase})")
             return ""
 
+        # In stream mode, capture context for later streaming instead of calling LLM
+        if getattr(self, '_stream_mode', False):
+            ctx = self._prepare_llm_context(user_message, cognitive_load)
+            self._stream_capture = ctx
+            logger.info(f"[LLM] Stream mode — context captured (phase={self.phase})")
+            return ""
+
+        ctx = self._prepare_llm_context(user_message, cognitive_load)
+
+        logger.info(f"[LLM] Generating response (phase={self.phase}, msg_len={len(user_message)}, history_len={len(self.conversation_history)}, profile_facts={len(self.profile.facts)})")
+        result = gen.generate(
+            user_message=ctx["user_message"],
+            conversation_history=ctx["conversation_history"],
+            phase=ctx["phase"],
+            belief_summary=ctx["belief_summary"],
+            tom_summary=ctx["tom_summary"],
+            cognitive_load=ctx["cognitive_load"],
+            target_skill=ctx["target_skill"],
+            current_intervention=ctx["current_intervention"],
+            accepted_interventions=ctx["accepted_interventions"],
+            profile_section=ctx["profile_section"],
+        )
+        if result:
+            logger.info(f"[LLM] Got response ({len(result)} chars)")
+        else:
+            logger.warning(f"[LLM] Empty response — falling back to template (phase={self.phase})")
+        return result
+
+    def _prepare_llm_context(self, user_message: str, cognitive_load: Optional[Dict] = None) -> Dict[str, Any]:
+        """Prepare shared context dict for LLM generation (used by both sync and stream)."""
         intervention_dict = None
         if self.current_intervention:
             intervention_dict = {
@@ -216,7 +246,6 @@ class CoachingAgent:
                 "difficulty": self.current_intervention.difficulty,
             }
 
-        # Use pre-computed cognitive load if provided, otherwise compute fresh
         if cognitive_load is None:
             cognitive_load = self._assess_cognitive_load(user_message)
         user_state = self.get_inferred_user_state()
@@ -224,41 +253,56 @@ class CoachingAgent:
         cognitive_load["inferred_topics"] = user_state.get("recent_topics", [])
         cognitive_load["engagement_level"] = user_state.get("engagement_level", "moderate")
 
-        # Add circumplex emotional state
         current_emotion = self.emotion.get_current_emotion()
         if current_emotion:
             cognitive_load["circumplex_emotion"] = current_emotion.emotion_label()
             cognitive_load["circumplex_valence"] = round(current_emotion.valence, 2)
             cognitive_load["circumplex_arousal"] = round(current_emotion.arousal, 2)
 
-        # Add prediction error (how well did we predict their emotion?)
         if self._last_error:
             cognitive_load["emotion_prediction_error"] = round(self._last_error.magnitude, 3)
             if self._last_prediction and self._last_observation:
                 cognitive_load["predicted_emotion"] = self._last_prediction.predicted_emotion
                 cognitive_load["observed_emotion"] = self._last_observation.observed_emotion
 
-        # Profile section for system prompt (Bayesian network causal model)
-        profile_section = self.profile.format_for_prompt()
+        return {
+            "user_message": user_message,
+            "conversation_history": self.conversation_history,
+            "phase": self.phase,
+            "belief_summary": self.get_belief_summary(),
+            "tom_summary": self.tom.get_user_type_summary(),
+            "cognitive_load": cognitive_load,
+            "target_skill": self.target_skill,
+            "current_intervention": intervention_dict,
+            "accepted_interventions": self._accepted_interventions,
+            "profile_section": self.profile.format_for_prompt(),
+        }
 
-        logger.info(f"[LLM] Generating response (phase={self.phase}, msg_len={len(user_message)}, history_len={len(self.conversation_history)}, profile_facts={len(self.profile.facts)})")
-        result = gen.generate(
-            user_message=user_message,
-            conversation_history=self.conversation_history,
-            phase=self.phase,
-            belief_summary=self.get_belief_summary(),
-            tom_summary=self.tom.get_user_type_summary(),
-            cognitive_load=cognitive_load,
-            target_skill=self.target_skill,
-            current_intervention=intervention_dict,
-            accepted_interventions=self._accepted_interventions,
-            profile_section=profile_section,
+    def _llm_generate_stream(self, user_message: str, cognitive_load: Optional[Dict] = None):
+        """
+        Stream LLM response, yielding text chunks.
+
+        Returns a generator of string chunks. If LLM is unavailable, yields nothing.
+        """
+        gen = self.generator
+        if gen is None:
+            return
+
+        ctx = self._prepare_llm_context(user_message, cognitive_load)
+        logger.info(f"[LLM] Streaming response (phase={self.phase}, msg_len={len(user_message)}, profile_facts={len(self.profile.facts)})")
+
+        yield from gen.generate_stream(
+            user_message=ctx["user_message"],
+            conversation_history=ctx["conversation_history"],
+            phase=ctx["phase"],
+            belief_summary=ctx["belief_summary"],
+            tom_summary=ctx["tom_summary"],
+            cognitive_load=ctx["cognitive_load"],
+            target_skill=ctx["target_skill"],
+            current_intervention=ctx["current_intervention"],
+            accepted_interventions=ctx["accepted_interventions"],
+            profile_section=ctx["profile_section"],
         )
-        if result:
-            logger.info(f"[LLM] Got response ({len(result)} chars)")
-        else:
-            logger.warning(f"[LLM] Empty response — falling back to template (phase={self.phase})")
-        return result
 
     def _assess_cognitive_load(self, user_message: str = "", emotional_data: Optional[Dict] = None) -> Dict[str, Any]:
         """
@@ -767,6 +811,85 @@ class CoachingAgent:
             return self._step_coaching(user_input)
         else:
             return {"phase": PHASE_COMPLETE, "message": "Session complete.", "is_complete": True}
+
+    def step_stream(self, user_input: Dict[str, Any]):
+        """
+        Streaming version of step(). Yields SSE event dicts.
+
+        Events:
+            {"event": "metadata", "data": {phase, sphere_data, question, ...}}
+            {"event": "token",    "data": {"text": "chunk"}}  (repeated)
+            {"event": "done",     "data": {}}
+        """
+        self.timestep += 1
+
+        # Calibration: no LLM call, yield result directly
+        if self.phase == PHASE_CALIBRATION:
+            result = self._step_calibration(user_input)
+            yield {"event": "metadata", "data": result}
+            yield {"event": "done", "data": {}}
+            return
+
+        # Enable stream capture: _llm_generate will save context instead of calling LLM
+        self._stream_capture = None
+        self._stream_mode = True
+        try:
+            if self.phase == PHASE_VISUALIZATION:
+                result = self._step_visualization(user_input)
+            elif self.phase == PHASE_PLANNING:
+                result = self._step_planning(user_input)
+            elif self.phase == PHASE_UPDATE:
+                result = self._step_update(user_input)
+            elif self.phase == PHASE_COACHING:
+                result = self._step_coaching(user_input)
+            else:
+                result = {"phase": PHASE_COMPLETE, "message": "Session complete.", "is_complete": True}
+        finally:
+            self._stream_mode = False
+
+        captured = self._stream_capture
+        self._stream_capture = None
+
+        # Yield metadata (everything except message)
+        template_msg = result.get("message", "")
+        metadata = {k: v for k, v in result.items() if k != "message"}
+        yield {"event": "metadata", "data": metadata}
+
+        # Stream LLM response if context was captured
+        if captured and self.generator:
+            collected = []
+            for chunk in self.generator.generate_stream(
+                user_message=captured["user_message"],
+                conversation_history=captured["conversation_history"],
+                phase=captured["phase"],
+                belief_summary=captured["belief_summary"],
+                tom_summary=captured["tom_summary"],
+                cognitive_load=captured["cognitive_load"],
+                target_skill=captured["target_skill"],
+                current_intervention=captured["current_intervention"],
+                accepted_interventions=captured["accepted_interventions"],
+                profile_section=captured["profile_section"],
+            ):
+                collected.append(chunk)
+                yield {"event": "token", "data": {"text": chunk}}
+
+            full_text = "".join(collected)
+            if full_text:
+                # Replace template fallback in conversation history with real LLM response
+                for i in range(len(self.conversation_history) - 1, -1, -1):
+                    if self.conversation_history[i]["role"] == "assistant":
+                        self.conversation_history[i]["content"] = full_text
+                        break
+            else:
+                # LLM returned nothing — use template message
+                if template_msg:
+                    yield {"event": "token", "data": {"text": template_msg}}
+        else:
+            # No LLM available — yield template message at once
+            if template_msg:
+                yield {"event": "token", "data": {"text": template_msg}}
+
+        yield {"event": "done", "data": {}}
 
     # -------------------------------------------------------------------------
     # CALIBRATION PHASE
