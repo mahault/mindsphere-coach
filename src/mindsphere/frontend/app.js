@@ -1124,33 +1124,7 @@ document.getElementById('safety-btn')?.addEventListener('click', () => {
 });
 
 // =============================================================================
-// LLM STATUS CHECK
-// =============================================================================
-
-async function checkLLMStatus() {
-    const badge = document.getElementById('llm-status');
-    try {
-        const resp = await fetch('/api/status');
-        const data = await resp.json();
-        if (data.llm_available) {
-            badge.textContent = 'LLM: Connected';
-            badge.className = 'llm-badge connected';
-            badge.title = 'Mistral API key loaded — natural conversation mode';
-        } else {
-            badge.textContent = 'LLM: Template mode';
-            badge.className = 'llm-badge template';
-            badge.title = 'No API key — using template responses. Add MISTRAL_API_KEY for natural conversation.';
-        }
-    } catch {
-        badge.textContent = 'LLM: Offline';
-        badge.className = 'llm-badge template';
-        badge.title = 'Could not check LLM status';
-    }
-}
-
-// =============================================================================
 // INIT
 // =============================================================================
 
-checkLLMStatus();
 startSession();
