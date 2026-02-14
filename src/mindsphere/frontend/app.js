@@ -466,7 +466,7 @@ async function refreshProfilePanel() {
         renderCircumplex(data.emotional_state);
         renderTomProfile(data.tom_profile);
         renderDependencyGraph(data.dependency_graph);
-        renderProfileFacts(data.profile_facts);
+        renderBayesNet(data.profile_facts);
     } catch (err) {
         console.warn('Failed to refresh profile panel:', err);
     }
@@ -806,66 +806,204 @@ function renderDependencyGraph(depGraph) {
 }
 
 // =============================================================================
-// PROFILE PANEL — Profile Facts
+// PROFILE PANEL — Bayesian Network (Facts + Causal Graph)
 // =============================================================================
 
-function renderProfileFacts(profileFacts) {
+function renderBayesNet(profileFacts) {
     if (!profileFacts) return;
     const container = document.getElementById('facts-content');
     if (!container) return;
 
-    const observed = profileFacts.observed || [];
-    const inferred = profileFacts.inferred || [];
-    const bayesInferences = profileFacts.bayes_inferences || [];
+    const facts = profileFacts.facts || [];
+    const bayesNet = profileFacts.bayes_net || {};
+    const bnNodes = bayesNet.nodes || [];
+    const bnEdges = bayesNet.edges || [];
 
-    if (observed.length === 0 && inferred.length === 0 && bayesInferences.length === 0) {
+    if (facts.length === 0 && bnNodes.length === 0) {
         container.innerHTML = '<p class="profile-empty">No facts extracted yet. They\'ll appear as we talk.</p>';
         return;
     }
 
     let html = '';
 
-    if (observed.length > 0) {
-        html += '<div class="facts-section"><div class="facts-heading">Observed</div>';
-        observed.forEach(f => {
-            const cat = f.category || 'general';
-            const valenceClass = f.valence === 'negative' ? 'neg' : f.valence === 'positive' ? 'pos' : 'neu';
-            html += `<div class="fact-item ${valenceClass}">
-                <span class="fact-badge">${cat}</span>
-                <span class="fact-text">${f.content || f.text || ''}</span>
-            </div>`;
-        });
-        html += '</div>';
+    // If we have a Bayesian network with edges, render it as a graph
+    if (bnNodes.length > 0 && bnEdges.length > 0) {
+        html += '<div id="bayes-graph"></div>';
     }
 
-    if (inferred.length > 0) {
-        html += '<div class="facts-section"><div class="facts-heading">Inferred</div>';
-        inferred.forEach(f => {
-            const cat = f.category || 'inferred';
-            html += `<div class="fact-item inferred">
-                <span class="fact-badge">${cat}</span>
-                <span class="fact-text">${f.content || f.text || ''}</span>
-            </div>`;
-        });
-        html += '</div>';
-    }
+    // Facts list (below graph, if present)
+    if (facts.length > 0) {
+        const observed = facts.filter(f => f.source === 'explicit');
+        const inferred = facts.filter(f => f.source !== 'explicit');
 
-    if (bayesInferences.length > 0) {
+        if (observed.length > 0) {
+            html += '<div class="facts-section"><div class="facts-heading">Observed</div>';
+            observed.forEach(f => {
+                const cat = f.category || 'general';
+                const valenceClass = f.valence === 'negative' ? 'neg' : f.valence === 'positive' ? 'pos' : 'neu';
+                html += `<div class="fact-item ${valenceClass}">
+                    <span class="fact-badge">${cat}</span>
+                    <span class="fact-text">${f.content || ''}</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+
+        if (inferred.length > 0) {
+            html += '<div class="facts-section"><div class="facts-heading">Inferred</div>';
+            inferred.forEach(f => {
+                const cat = f.category || 'inferred';
+                html += `<div class="fact-item inferred">
+                    <span class="fact-badge">${cat}</span>
+                    <span class="fact-text">${f.content || ''}</span>
+                </div>`;
+            });
+            html += '</div>';
+        }
+    } else if (bnNodes.length > 0) {
+        // Show nodes as list if no flat facts but we have BN nodes
         html += '<div class="facts-section"><div class="facts-heading">Causal Inferences</div>';
-        bayesInferences.forEach(n => {
+        bnNodes.forEach(n => {
             const prob = Math.round((n.probability || 0) * 100);
-            html += `<div class="fact-item causal">
+            const obsClass = n.observed ? 'pos' : 'inferred';
+            html += `<div class="fact-item ${obsClass}">
+                <span class="fact-badge">${n.observed ? 'observed' : 'inferred'}</span>
                 <span class="fact-text">${n.content || ''}</span>
-                <div class="fact-prob-bar">
-                    <div class="fact-prob-fill" style="width: ${prob}%"></div>
-                    <span class="fact-prob-label">${prob}%</span>
-                </div>
+                <span class="fact-prob-inline">${prob}%</span>
             </div>`;
         });
         html += '</div>';
     }
 
     container.innerHTML = html;
+
+    // Render the Bayesian network graph if we have edges
+    if (bnNodes.length > 0 && bnEdges.length > 0) {
+        renderBayesGraph(bnNodes, bnEdges);
+    }
+}
+
+function renderBayesGraph(nodes, edges) {
+    const container = document.getElementById('bayes-graph');
+    if (!container) return;
+
+    // Use a top-down layered layout: observed nodes at top, inferred below
+    const observed = nodes.filter(n => n.observed);
+    const inferred = nodes.filter(n => !n.observed);
+
+    // Position nodes in layers
+    const positions = {};
+    const width = 1.0;
+
+    // Top layer: observed facts
+    observed.forEach((n, i) => {
+        positions[n.id] = {
+            x: (i + 0.5) / Math.max(observed.length, 1) * width,
+            y: 0.85,
+        };
+    });
+
+    // Bottom layer: inferred states
+    inferred.forEach((n, i) => {
+        positions[n.id] = {
+            x: (i + 0.5) / Math.max(inferred.length, 1) * width,
+            y: 0.15,
+        };
+    });
+
+    const traces = [];
+
+    // Edges
+    edges.forEach(edge => {
+        const s = positions[edge.source];
+        const t = positions[edge.target];
+        if (!s || !t) return;
+
+        const isNeg = edge.relationship === 'decreases' || edge.relationship === 'blocks';
+        const edgeColor = isNeg
+            ? `rgba(231, 76, 60, ${0.3 + edge.strength * 0.5})`
+            : `rgba(74, 144, 217, ${0.3 + edge.strength * 0.5})`;
+
+        traces.push({
+            type: 'scatter',
+            mode: 'lines',
+            x: [s.x, t.x],
+            y: [s.y, t.y],
+            line: { color: edgeColor, width: 1 + edge.strength * 3 },
+            hoverinfo: 'skip',
+            showlegend: false,
+        });
+
+        // Arrow at midpoint
+        const mx = s.x + 0.7 * (t.x - s.x);
+        const my = s.y + 0.7 * (t.y - s.y);
+        traces.push({
+            type: 'scatter',
+            mode: 'markers',
+            x: [mx], y: [my],
+            marker: {
+                symbol: 'triangle-down',
+                size: 7,
+                color: edgeColor,
+            },
+            hovertemplate: `${edge.relationship} (${Math.round(edge.strength * 100)}%)<extra></extra>`,
+            showlegend: false,
+        });
+    });
+
+    // Nodes
+    const allNodes = [...observed, ...inferred];
+    const nodeX = allNodes.map(n => positions[n.id]?.x || 0.5);
+    const nodeY = allNodes.map(n => positions[n.id]?.y || 0.5);
+    const nodeColors = allNodes.map(n => {
+        if (n.observed) return '#22c55e';
+        const p = n.probability || 0;
+        if (p > 0.6) return '#E74C3C';
+        if (p > 0.3) return '#f59e0b';
+        return '#4A90D9';
+    });
+    const nodeText = allNodes.map(n => {
+        const label = (n.content || '').length > 25
+            ? (n.content || '').substring(0, 22) + '...'
+            : (n.content || '');
+        return label;
+    });
+    const nodeSizes = allNodes.map(n => n.observed ? 14 : 10 + (n.probability || 0) * 8);
+
+    traces.push({
+        type: 'scatter',
+        mode: 'markers+text',
+        x: nodeX, y: nodeY,
+        marker: {
+            color: nodeColors,
+            size: nodeSizes,
+            line: { color: 'rgba(200,200,200,0.3)', width: 1.5 },
+        },
+        text: nodeText,
+        textposition: allNodes.map(n => n.observed ? 'top center' : 'bottom center'),
+        textfont: { color: '#e4e4e7', size: 9 },
+        hovertemplate: allNodes.map(n => {
+            const prob = Math.round((n.probability || 0) * 100);
+            const type = n.observed ? 'Observed' : 'Inferred';
+            return `${n.content}<br>${type} (${prob}%)<extra></extra>`;
+        }),
+        showlegend: false,
+    });
+
+    const layout = {
+        ...PLOTLY_DARK,
+        margin: { t: 10, b: 10, l: 10, r: 10 },
+        height: Math.max(180, 60 + allNodes.length * 20),
+        xaxis: { visible: false, range: [-0.1, 1.1] },
+        yaxis: { visible: false, range: [-0.1, 1.0] },
+        showlegend: false,
+        annotations: [
+            { x: 0.0, y: 0.95, text: 'Observed', showarrow: false, font: { color: 'rgba(34,197,94,0.6)', size: 9 } },
+            { x: 0.0, y: 0.05, text: 'Inferred', showarrow: false, font: { color: 'rgba(74,144,217,0.6)', size: 9 } },
+        ],
+    };
+
+    Plotly.newPlot(container, traces, layout, PLOTLY_CONFIG);
 }
 
 // =============================================================================

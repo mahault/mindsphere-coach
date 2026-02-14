@@ -345,9 +345,15 @@ class CoachingAgent:
                 signals.append("emotional_surprise")
 
             # Current valence strongly negative
-            current = emotional_data.get("current_emotion", {})
-            if current and current.get("valence", 0) < -0.3:
+            current = emotional_data.get("current_emotion") or {}
+            if current.get("valence", 0) < -0.3:
                 signals.append("low_valence")
+
+            # Also check the observation directly (in case current_emotion is empty)
+            obs = emotional_data.get("observation") or {}
+            if obs.get("observed_valence", 0) < -0.3:
+                if "low_valence" not in signals:
+                    signals.append("low_valence")
 
         # Track recent sentiments
         self._recent_sentiments.append(
@@ -1393,7 +1399,7 @@ class CoachingAgent:
         cog_load = self._assess_cognitive_load(user_text, emotional_data=emotional_data)
         if wants_more_action and cog_load["coaching_readiness"] != "not_ready":
             self._track_conversation("user", user_text)
-            result = self._propose_next_coaching_step()
+            result = self._propose_next_coaching_step(cognitive_load=cog_load)
             result["efe_info"] = {"selected_action": "propose_intervention", "override": "explicit_request"}
             result["emotional_state"] = emotional_data
             self._track_conversation("assistant", result.get("message", ""))
@@ -1443,7 +1449,7 @@ class CoachingAgent:
         logger.info(f"[Coaching] EFE selected: {action_name} (probs={efe_info.get('action_probabilities', {})})")
         if action_name == "propose_intervention":
             self._track_conversation("user", user_text)
-            result = self._propose_next_coaching_step()
+            result = self._propose_next_coaching_step(cognitive_load=cog_load)
             result["efe_info"] = efe_info
             result["emotional_state"] = emotional_data
             self._track_conversation("assistant", result.get("message", ""))
@@ -1581,63 +1587,38 @@ class CoachingAgent:
 
         return None
 
-    def _propose_next_coaching_step(self) -> Dict[str, Any]:
-        """Propose the next coaching step, using EFE to decide between exercise, probe, or sphere."""
-        # Use EFE to decide what type of next step to offer
-        action_idx, action_name, efe_info = select_coaching_action(
-            beliefs=self.beliefs,
-            model=self.model,
-            phase="coaching",
-            timestep=self.timestep,
-            tom_reliability=self.tom.reliability,
-            empathy_planner=self.empathy,
-            tom_filter=self.tom,
-            target_skill=self.target_skill,
-            current_intervention=self.current_intervention,
-        )
+    def _propose_next_coaching_step(self, cognitive_load: Optional[Dict] = None) -> Dict[str, Any]:
+        """Propose the next coaching step via LLM (EFE already decided to propose)."""
+        exercise = self._get_next_exercise()
+        if exercise:
+            sorted_skills = self._get_skill_scores_sorted()
+            next_skill = sorted_skills[0][0]
+            for skill_name, score in sorted_skills:
+                if skill_name != self.target_skill:
+                    next_skill = skill_name
+                    break
+            skill_label = self._label(next_skill)
 
-        if action_name in ("ask_free_text", "reframe"):
-            # EFE says: probe the user more (epistemic drive)
-            probe = self._get_next_probe()
-            if probe:
-                message = (
-                    f"Before we add more steps, let me understand something better. "
-                    f"{probe}"
-                )
-            else:
-                message = (
-                    "We've covered a lot of ground. What feels like the most important thing "
-                    "you're taking away from this conversation?"
-                )
+            # Use LLM to present the exercise naturally
+            system_hint = (
+                f"[SYSTEM: Propose this intervention naturally: "
+                f"Target skill: {skill_label} ({self.model.get_skill_score(self.beliefs.get(next_skill, np.ones(5)/5)):.0f}/100). "
+                f"Suggestion: \"{exercise}\". "
+                f"Weave it into the conversation — don't just announce it. "
+                f"Keep it to 2-3 sentences.]"
+            )
+            llm_response = self._llm_generate(system_hint, cognitive_load=cognitive_load)
+            message = llm_response or (
+                f"Here's something to try — this one targets your {skill_label}: "
+                f"{exercise} How does that land?"
+            )
         else:
-            # EFE says: propose an exercise (pragmatic drive)
-            exercise = self._get_next_exercise()
-            if exercise:
-                sorted_skills = self._get_skill_scores_sorted()
-                next_skill = sorted_skills[0][0]
-                for skill_name, score in sorted_skills:
-                    if skill_name != self.target_skill:
-                        next_skill = skill_name
-                        break
-                skill_label = self._label(next_skill)
-                message = (
-                    f"Here's something else to try — this one targets your {skill_label}: "
-                    f"{exercise}\n\n"
-                    f"How does that land?"
-                )
-            else:
-                # Exhausted exercises — probe instead
-                probe = self._get_next_probe()
-                if probe:
-                    message = (
-                        f"Before we add more steps, let me understand something better. "
-                        f"{probe}"
-                    )
-                else:
-                    message = (
-                        "We've covered a lot of ground. What feels like the most important thing "
-                        "you're taking away from this conversation?"
-                    )
+            # Exhausted exercises — probe instead
+            probe = self._get_next_probe()
+            message = probe or (
+                "We've covered a lot of ground. What feels like the most important thing "
+                "you're taking away from this conversation?"
+            )
 
         return {
             "phase": PHASE_COACHING,
@@ -2768,18 +2749,22 @@ class CoachingAgent:
         profile_summary = self.profile.get_summary()
         facts = profile_summary.get("facts", [])
         bayes_net = profile_summary.get("bayes_net", {})
-        observed_facts = [f for f in facts if f.get("source") == "explicit"]
-        inferred_facts = [f for f in facts if f.get("source") != "explicit"]
-        # Also include Bayesian network inferred nodes
-        bn_nodes = bayes_net.get("nodes", [])
-        inferred_nodes = [
-            n for n in bn_nodes if not n.get("observed", True)
-        ]
+
+        # Bayes net nodes dict {id: node_dict} → list with id included
+        bn_nodes_dict = bayes_net.get("nodes", {})
+        bn_nodes_list = []
+        for nid, ndata in bn_nodes_dict.items():
+            node = dict(ndata)
+            node["id"] = nid
+            bn_nodes_list.append(node)
 
         profile_facts = {
-            "observed": observed_facts,
-            "inferred": inferred_facts,
-            "bayes_inferences": inferred_nodes,
+            "facts": facts,
+            "bayes_net": {
+                "nodes": bn_nodes_list,
+                "edges": bayes_net.get("edges", []),
+                "skill_impacts": bayes_net.get("skill_impacts", {}),
+            },
         }
 
         # Score deltas: compare current vs previous snapshot

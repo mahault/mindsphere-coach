@@ -599,6 +599,22 @@ body {
     line-height: 14px;
 }
 
+.fact-prob-inline {
+    font-size: 10px;
+    font-family: monospace;
+    color: var(--accent-blue);
+    white-space: nowrap;
+}
+
+/* Bayes Network Graph */
+#bayes-graph {
+    width: 100%;
+    min-height: 180px;
+    padding: 4px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+}
+
 /* Safety Notice */
 #safety-notice {
     padding: 8px 24px;
