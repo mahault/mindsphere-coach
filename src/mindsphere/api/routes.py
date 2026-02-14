@@ -173,6 +173,20 @@ async def get_user_state(session_id: str):
     return agent.get_inferred_user_state()
 
 
+@router.get("/session/{session_id}/profile-data")
+async def get_profile_data(session_id: str):
+    """Get detailed profile data for visualization panel."""
+    sm = get_session_manager()
+    if not sm.session_exists(session_id):
+        raise HTTPException(404, f"Session {session_id} not found")
+
+    agent = sm.get_agent(session_id)
+    if agent is None:
+        raise HTTPException(500, "Agent not found")
+
+    return agent.get_profile_data()
+
+
 @router.post("/session/{session_id}/empathy-dial")
 async def set_empathy_dial(session_id: str, request: EmpathyDialRequest):
     """Adjust the empathy dial for a session."""

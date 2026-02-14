@@ -426,39 +426,177 @@ body {
     font-family: monospace;
 }
 
-/* Belief Panel */
-#belief-panel {
+/* Profile Panel */
+#profile-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+#profile-panel details {
     background: var(--bg-card);
     border-radius: var(--radius);
     border: 1px solid var(--border);
     font-size: 13px;
 }
 
-#belief-panel summary {
-    padding: 12px 16px;
+#profile-panel details summary {
+    padding: 10px 16px;
     cursor: pointer;
     color: var(--text-secondary);
     font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    user-select: none;
 }
 
-#belief-content, #tom-stats {
-    padding: 0 16px 12px;
+#profile-panel details summary:hover {
+    color: var(--text-primary);
 }
 
-.belief-row {
-    display: flex;
-    justify-content: space-between;
-    padding: 4px 0;
+#profile-panel details[open] summary {
+    border-bottom: 1px solid var(--border);
+    color: var(--accent-blue);
+}
+
+/* Skill Distributions Chart */
+#skill-dist-chart {
+    width: 100%;
+    min-height: 280px;
+    padding: 8px;
+}
+
+/* Circumplex Chart */
+#circumplex-chart {
+    width: 100%;
+    min-height: 260px;
+    padding: 8px;
+}
+
+/* ToM Chart */
+#tom-chart {
+    width: 100%;
+    min-height: 230px;
+    padding: 8px;
+}
+
+.tom-reliability-badge {
+    padding: 8px 16px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    border-top: 1px solid var(--border);
+}
+
+/* Dependency Graph Chart */
+#dependency-chart {
+    width: 100%;
+    min-height: 300px;
+    padding: 8px;
+}
+
+/* Profile Facts */
+#facts-content {
+    padding: 12px 16px;
+}
+
+.profile-empty {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-style: italic;
+    padding: 8px 0;
+}
+
+.facts-section {
+    margin-bottom: 12px;
+}
+
+.facts-section:last-child {
+    margin-bottom: 0;
+}
+
+.facts-heading {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--accent-blue);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 6px;
+    padding-bottom: 4px;
     border-bottom: 1px solid var(--border);
 }
 
-.belief-label {
-    color: var(--text-secondary);
+.fact-item {
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(46, 50, 64, 0.5);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
 }
 
-.belief-value {
-    font-family: monospace;
+.fact-item:last-child {
+    border-bottom: none;
+}
+
+.fact-badge {
+    font-size: 9px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(74, 144, 217, 0.15);
+    color: var(--accent-blue);
+    white-space: nowrap;
+}
+
+.fact-item.neg .fact-badge {
+    background: rgba(231, 76, 60, 0.15);
+    color: var(--accent-red);
+}
+
+.fact-item.pos .fact-badge {
+    background: rgba(34, 197, 94, 0.15);
+    color: var(--accent-green);
+}
+
+.fact-text {
+    font-size: 12px;
     color: var(--text-primary);
+    line-height: 1.4;
+    flex: 1;
+}
+
+.fact-item.causal {
+    flex-direction: column;
+    align-items: stretch;
+}
+
+.fact-prob-bar {
+    position: relative;
+    height: 14px;
+    background: rgba(46, 50, 64, 0.8);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+
+.fact-prob-fill {
+    height: 100%;
+    background: rgba(74, 144, 217, 0.4);
+    border-radius: 3px;
+    transition: width 0.3s ease;
+}
+
+.fact-prob-label {
+    position: absolute;
+    right: 6px;
+    top: 0;
+    font-size: 10px;
+    font-family: monospace;
+    color: var(--text-secondary);
+    line-height: 14px;
 }
 
 /* Safety Notice */

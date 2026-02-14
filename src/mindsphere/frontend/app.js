@@ -2,7 +2,7 @@
  * MindSphere Coach — Frontend Application
  *
  * Handles REST API communication, Plotly radar chart rendering,
- * chat UI, and real-time belief/sphere updates.
+ * chat UI, profile visualization panel, and real-time updates.
  */
 
 // =============================================================================
@@ -38,10 +38,56 @@ const els = {
     planPanel: document.getElementById('plan-panel'),
     interventionCard: document.getElementById('intervention-card'),
     counterfactualDisplay: document.getElementById('counterfactual-display'),
-    beliefContent: document.getElementById('belief-content'),
-    tomStats: document.getElementById('tom-stats'),
+    profilePanel: document.getElementById('profile-panel'),
     safetyNotice: document.getElementById('safety-notice'),
 };
+
+// =============================================================================
+// CONSTANTS
+// =============================================================================
+
+const SKILL_LABELS = {
+    focus: 'Focus',
+    follow_through: 'Follow-through',
+    social_courage: 'Social Courage',
+    emotional_reg: 'Emotional Reg.',
+    systems_thinking: 'Systems Thinking',
+    self_trust: 'Self-Trust',
+    task_clarity: 'Task Clarity',
+    consistency: 'Consistency',
+};
+
+const SKILL_ORDER = [
+    'focus', 'follow_through', 'social_courage', 'emotional_reg',
+    'systems_thinking', 'self_trust', 'task_clarity', 'consistency',
+];
+
+const BELIEF_LEVEL_LABELS = ['Very Low', 'Low', 'Medium', 'High', 'Very High'];
+const BELIEF_LEVEL_COLORS = [
+    'rgba(231, 76, 60, 0.8)',    // Very Low — red
+    'rgba(243, 156, 18, 0.8)',   // Low — orange
+    'rgba(241, 196, 15, 0.8)',   // Medium — yellow
+    'rgba(46, 204, 113, 0.8)',   // High — green
+    'rgba(39, 174, 96, 0.8)',    // Very High — dark green
+];
+
+const TOM_DIM_LABELS = {
+    avoids_evaluation: 'Avoids Evaluation',
+    hates_long_tasks: 'Prefers Short Tasks',
+    novelty_seeking: 'Novelty Seeking',
+    structure_preference: 'Structure Preference',
+    external_validation: 'External Validation',
+    autonomy_sensitivity: 'Autonomy Sensitivity',
+    overwhelm_threshold: 'Overwhelm Threshold',
+};
+
+const PLOTLY_DARK = {
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    font: { color: '#a1a1aa', size: 11 },
+};
+
+const PLOTLY_CONFIG = { displayModeBar: false, responsive: true };
 
 // =============================================================================
 // SESSION MANAGEMENT
@@ -132,9 +178,9 @@ async function sendMessage(content, extra = {}) {
         if (data.counterfactual) renderCounterfactual(data.counterfactual);
         if (data.intervention) renderIntervention(data.intervention);
 
-        // Show belief summary
-        if (data.belief_summary && data.phase !== 'calibration') {
-            renderBeliefUpdate({ beliefs: data.belief_summary });
+        // Refresh profile panel after calibration
+        if (data.phase !== 'calibration') {
+            refreshProfilePanel();
         }
 
         // After calibration: always show text input for chatting
@@ -189,7 +235,7 @@ function sendChoice(choice) {
 }
 
 // =============================================================================
-// UI RENDERING
+// UI RENDERING — Core
 // =============================================================================
 
 function addMessage(role, content) {
@@ -251,6 +297,7 @@ function updatePhaseUI(phase, progress) {
     // Show/hide panels based on phase — sphere only after calibration
     if (phase === 'visualization' || phase === 'planning' || phase === 'update' || phase === 'coaching' || phase === 'complete') {
         els.spherePanel.classList.remove('hidden');
+        els.profilePanel.classList.remove('hidden');
     }
     if (phase === 'planning' || phase === 'update') {
         els.planPanel.classList.remove('hidden');
@@ -261,25 +308,18 @@ function updatePhaseUI(phase, progress) {
     }
 }
 
+// =============================================================================
+// UI RENDERING — Sphere (Radar Chart)
+// =============================================================================
+
 function renderSphere(sphereData) {
     els.spherePanel.classList.remove('hidden');
 
     const categories = sphereData.categories;
     const bottlenecks = sphereData.bottlenecks || [];
 
-    const skills = [
-        'focus', 'follow_through', 'social_courage', 'emotional_reg',
-        'systems_thinking', 'self_trust', 'task_clarity', 'consistency'
-    ];
-    const labels = {
-        focus: 'Focus', follow_through: 'Follow-through',
-        social_courage: 'Social Courage', emotional_reg: 'Emotional Regulation',
-        systems_thinking: 'Systems Thinking', self_trust: 'Self-Trust',
-        task_clarity: 'Task Clarity', consistency: 'Consistency',
-    };
-
-    const theta = skills.map(s => labels[s] || s);
-    const r = skills.map(s => categories[s] || 50);
+    const theta = SKILL_ORDER.map(s => SKILL_LABELS[s] || s);
+    const r = SKILL_ORDER.map(s => categories[s] || 50);
     theta.push(theta[0]);
     r.push(r[0]);
 
@@ -300,9 +340,9 @@ function renderSphere(sphereData) {
         const bnSkills = new Set(bottlenecks.map(b => b.blocker));
         const bnTheta = [];
         const bnR = [];
-        skills.forEach(s => {
+        SKILL_ORDER.forEach(s => {
             if (bnSkills.has(s)) {
-                bnTheta.push(labels[s]);
+                bnTheta.push(SKILL_LABELS[s]);
                 bnR.push(categories[s] || 50);
             }
         });
@@ -330,14 +370,12 @@ function renderSphere(sphereData) {
             bgcolor: 'rgba(0, 0, 0, 0)',
         },
         showlegend: false,
-        paper_bgcolor: 'rgba(0, 0, 0, 0)',
-        plot_bgcolor: 'rgba(0, 0, 0, 0)',
-        font: { color: '#a1a1aa', size: 11 },
+        ...PLOTLY_DARK,
         margin: { t: 30, b: 30, l: 50, r: 50 },
         height: 380,
     };
 
-    Plotly.newPlot(els.radarChart, traces, layout, { displayModeBar: false, responsive: true });
+    Plotly.newPlot(els.radarChart, traces, layout, PLOTLY_CONFIG);
 
     if (bottlenecks.length > 0) {
         els.bottleneckInfo.innerHTML = bottlenecks.slice(0, 3).map(bn => {
@@ -352,6 +390,10 @@ function renderSphere(sphereData) {
         els.bottleneckInfo.innerHTML = '<p>No significant bottlenecks. Your sphere is fairly balanced.</p>';
     }
 }
+
+// =============================================================================
+// UI RENDERING — Plan / Counterfactual
+// =============================================================================
 
 function renderCounterfactual(cf) {
     if (!cf) return;
@@ -411,40 +453,419 @@ function renderIntervention(intervention) {
     `;
 }
 
-function renderBeliefUpdate(data) {
-    if (!data || !data.beliefs) return;
-    const beliefs = data.beliefs;
+// =============================================================================
+// PROFILE PANEL — Data fetching
+// =============================================================================
 
-    let html = '';
-    for (const [key, val] of Object.entries(beliefs)) {
-        if (key === 'tom_reliability' || key === 'user_type') continue;
-        if (typeof val === 'object' && val.score !== undefined) {
-            html += `<div class="belief-row">
-                <span class="belief-label">${key.replace(/_/g, ' ')}</span>
-                <span class="belief-value">${val.score}/100</span>
-            </div>`;
-        } else if (typeof val === 'object' && val.inferred !== undefined) {
-            html += `<div class="belief-row">
-                <span class="belief-label">${key.replace(/_/g, ' ')}</span>
-                <span class="belief-value">${val.inferred} (${Math.round(val.confidence * 100)}%)</span>
-            </div>`;
-        }
+async function refreshProfilePanel() {
+    if (!state.sessionId) return;
+    try {
+        const resp = await fetch(`/api/session/${state.sessionId}/profile-data`);
+        const data = await resp.json();
+        renderSkillDistributions(data.skill_beliefs, data.skill_scores, data.score_deltas);
+        renderCircumplex(data.emotional_state);
+        renderTomProfile(data.tom_profile);
+        renderDependencyGraph(data.dependency_graph);
+        renderProfileFacts(data.profile_facts);
+    } catch (err) {
+        console.warn('Failed to refresh profile panel:', err);
     }
-    els.beliefContent.innerHTML = html;
+}
 
-    if (beliefs.tom_reliability !== undefined) {
-        const r = Math.round(beliefs.tom_reliability * 100);
-        els.tomStats.innerHTML = `
-            <div class="belief-row">
-                <span class="belief-label">Model Confidence</span>
-                <span class="belief-value">${r}%</span>
-            </div>
-            <div class="belief-note">
-                How confident the agent is in its predictions about you.
-                Increases as you interact more.
+// =============================================================================
+// PROFILE PANEL — Skill Belief Distributions
+// =============================================================================
+
+function renderSkillDistributions(skillBeliefs, skillScores, scoreDeltas) {
+    if (!skillBeliefs) return;
+    const container = document.getElementById('skill-dist-chart');
+    if (!container) return;
+
+    // Reverse skill order so first skill appears at top
+    const skills = [...SKILL_ORDER].reverse();
+    const deltas = scoreDeltas || {};
+
+    // Build stacked horizontal bar traces — one per belief level
+    const traces = BELIEF_LEVEL_LABELS.map((level, i) => ({
+        type: 'bar',
+        name: level,
+        y: skills.map(s => {
+            const label = SKILL_LABELS[s] || s;
+            const delta = deltas[s] || 0;
+            const arrow = delta > 1 ? ' \u2191' : delta < -1 ? ' \u2193' : '';
+            return label + arrow;
+        }),
+        x: skills.map(s => {
+            const belief = skillBeliefs[s];
+            return belief ? Math.round(belief[i] * 100) : 0;
+        }),
+        orientation: 'h',
+        marker: { color: BELIEF_LEVEL_COLORS[i] },
+        hovertemplate: `%{y}: ${level} = %{x}%<extra></extra>`,
+    }));
+
+    const layout = {
+        barmode: 'stack',
+        ...PLOTLY_DARK,
+        margin: { t: 8, b: 30, l: 120, r: 40 },
+        height: 280,
+        xaxis: {
+            title: 'Belief %',
+            range: [0, 100],
+            gridcolor: 'rgba(200,200,200,0.1)',
+            ticksuffix: '%',
+        },
+        yaxis: {
+            automargin: true,
+        },
+        showlegend: true,
+        legend: {
+            orientation: 'h',
+            x: 0, y: -0.2,
+            font: { size: 9, color: '#a1a1aa' },
+        },
+        bargap: 0.3,
+    };
+
+    Plotly.newPlot(container, traces, layout, PLOTLY_CONFIG);
+}
+
+// =============================================================================
+// PROFILE PANEL — Emotional Circumplex
+// =============================================================================
+
+function renderCircumplex(emotionalState) {
+    if (!emotionalState) return;
+    const container = document.getElementById('circumplex-chart');
+    if (!container) return;
+
+    const traces = [];
+
+    // Quadrant background annotations will be added via layout
+    // Trajectory dots (fading opacity)
+    const trajectory = emotionalState.trajectory || [];
+    if (trajectory.length > 0) {
+        const traj = trajectory.slice(-5);
+        traces.push({
+            type: 'scatter',
+            mode: 'lines+markers',
+            x: traj.map(s => s.valence || 0),
+            y: traj.map(s => s.arousal || 0),
+            marker: {
+                color: traj.map((_, i) => `rgba(74, 144, 217, ${0.2 + 0.15 * i})`),
+                size: traj.map((_, i) => 6 + i),
+            },
+            line: { color: 'rgba(74, 144, 217, 0.3)', width: 1, dash: 'dot' },
+            name: 'Trajectory',
+            hovertemplate: 'V=%{x:.2f}, A=%{y:.2f}<extra>history</extra>',
+        });
+    }
+
+    // Current position
+    const current = emotionalState.current;
+    if (current) {
+        const v = current.valence || 0;
+        const a = current.arousal || 0;
+        const emotion = current.emotion || current.emotion_label || '?';
+        // Color by quadrant
+        let dotColor = '#4A90D9';
+        if (v < 0 && a > 0) dotColor = '#E74C3C';       // Tense/Angry
+        else if (v > 0 && a > 0) dotColor = '#22c55e';   // Excited/Happy
+        else if (v < 0 && a <= 0) dotColor = '#8b5cf6';   // Sad/Bored
+        else if (v >= 0 && a <= 0) dotColor = '#06b6d4';   // Calm/Relaxed
+
+        traces.push({
+            type: 'scatter',
+            mode: 'markers+text',
+            x: [v],
+            y: [a],
+            marker: { color: dotColor, size: 16, line: { color: 'white', width: 2 } },
+            text: [emotion],
+            textposition: 'top center',
+            textfont: { color: '#e4e4e7', size: 11 },
+            name: 'Current',
+            hovertemplate: `${emotion}<br>Valence: %{x:.2f}<br>Arousal: %{y:.2f}<extra></extra>`,
+        });
+    }
+
+    const layout = {
+        ...PLOTLY_DARK,
+        margin: { t: 20, b: 40, l: 45, r: 20 },
+        height: 260,
+        xaxis: {
+            title: 'Valence',
+            range: [-1.1, 1.1],
+            zeroline: true, zerolinecolor: 'rgba(200,200,200,0.2)',
+            gridcolor: 'rgba(200,200,200,0.08)',
+        },
+        yaxis: {
+            title: 'Arousal',
+            range: [-1.1, 1.1],
+            zeroline: true, zerolinecolor: 'rgba(200,200,200,0.2)',
+            gridcolor: 'rgba(200,200,200,0.08)',
+        },
+        showlegend: false,
+        annotations: [
+            { x: -0.7, y: 0.8, text: 'Tense', showarrow: false, font: { color: 'rgba(231,76,60,0.5)', size: 10 } },
+            { x: 0.7, y: 0.8, text: 'Excited', showarrow: false, font: { color: 'rgba(34,197,94,0.5)', size: 10 } },
+            { x: -0.7, y: -0.8, text: 'Sad', showarrow: false, font: { color: 'rgba(139,92,246,0.5)', size: 10 } },
+            { x: 0.7, y: -0.8, text: 'Calm', showarrow: false, font: { color: 'rgba(6,182,212,0.5)', size: 10 } },
+        ],
+        // Draw reference circle
+        shapes: [{
+            type: 'circle',
+            xref: 'x', yref: 'y',
+            x0: -1, y0: -1, x1: 1, y1: 1,
+            line: { color: 'rgba(200,200,200,0.1)', width: 1 },
+        }],
+    };
+
+    Plotly.newPlot(container, traces, layout, PLOTLY_CONFIG);
+}
+
+// =============================================================================
+// PROFILE PANEL — ToM User Type
+// =============================================================================
+
+function renderTomProfile(tomProfile) {
+    if (!tomProfile) return;
+    const chartContainer = document.getElementById('tom-chart');
+    const reliabilityContainer = document.getElementById('tom-reliability');
+    if (!chartContainer) return;
+
+    const dims = tomProfile.dimensions || {};
+    const dimKeys = Object.keys(TOM_DIM_LABELS);
+    const labels = dimKeys.map(k => TOM_DIM_LABELS[k] || k);
+    const values = dimKeys.map(k => Math.round((dims[k] || 0.5) * 100));
+
+    // Color gradient: blue (low) → amber (mid) → red (high sensitivity)
+    const colors = values.map(v => {
+        if (v < 30) return 'rgba(74, 144, 217, 0.8)';
+        if (v < 60) return 'rgba(245, 158, 11, 0.8)';
+        return 'rgba(231, 76, 60, 0.8)';
+    });
+
+    const traces = [{
+        type: 'bar',
+        y: labels.reverse(),
+        x: values.reverse(),
+        orientation: 'h',
+        marker: { color: colors.reverse() },
+        hovertemplate: '%{y}: %{x}%<extra></extra>',
+    }];
+
+    const layout = {
+        ...PLOTLY_DARK,
+        margin: { t: 8, b: 30, l: 130, r: 30 },
+        height: 230,
+        xaxis: {
+            range: [0, 100],
+            gridcolor: 'rgba(200,200,200,0.1)',
+            ticksuffix: '%',
+        },
+        yaxis: { automargin: true },
+        showlegend: false,
+        bargap: 0.3,
+    };
+
+    Plotly.newPlot(chartContainer, traces, layout, PLOTLY_CONFIG);
+
+    // Reliability badge
+    if (reliabilityContainer) {
+        const r = Math.round((tomProfile.reliability || 0) * 100);
+        const color = r > 60 ? 'var(--accent-green)' : r > 30 ? 'var(--accent-amber)' : 'var(--accent-red)';
+        reliabilityContainer.innerHTML = `
+            <div class="tom-reliability-badge">
+                Model Confidence: <span style="color: ${color}; font-weight: 600;">${r}%</span>
             </div>
         `;
     }
+}
+
+// =============================================================================
+// PROFILE PANEL — Causal Dependency Graph
+// =============================================================================
+
+function renderDependencyGraph(depGraph) {
+    if (!depGraph) return;
+    const container = document.getElementById('dependency-chart');
+    if (!container) return;
+
+    const nodes = depGraph.nodes || [];
+    const edges = depGraph.edges || [];
+
+    if (nodes.length === 0) {
+        container.innerHTML = '<p class="profile-empty">No data yet.</p>';
+        return;
+    }
+
+    // Circular layout for 8 nodes
+    const n = nodes.length;
+    const cx = 0.5, cy = 0.5, radius = 0.38;
+    const positions = {};
+    nodes.forEach((node, i) => {
+        const angle = (2 * Math.PI * i / n) - Math.PI / 2;
+        positions[node.id] = {
+            x: cx + radius * Math.cos(angle),
+            y: cy + radius * Math.sin(angle),
+        };
+    });
+
+    const traces = [];
+
+    // Edge lines
+    edges.forEach(edge => {
+        const s = positions[edge.source];
+        const t = positions[edge.target];
+        if (!s || !t) return;
+
+        // Draw line
+        traces.push({
+            type: 'scatter',
+            mode: 'lines',
+            x: [s.x, t.x],
+            y: [s.y, t.y],
+            line: {
+                color: `rgba(74, 144, 217, ${0.3 + edge.weight * 0.5})`,
+                width: 1 + edge.weight * 3,
+            },
+            hoverinfo: 'skip',
+            showlegend: false,
+        });
+
+        // Arrowhead (small triangle at 80% along the line)
+        const mx = s.x + 0.75 * (t.x - s.x);
+        const my = s.y + 0.75 * (t.y - s.y);
+        traces.push({
+            type: 'scatter',
+            mode: 'markers',
+            x: [mx],
+            y: [my],
+            marker: {
+                symbol: 'triangle-up',
+                size: 8,
+                color: `rgba(74, 144, 217, ${0.4 + edge.weight * 0.4})`,
+                angle: Math.atan2(t.y - s.y, t.x - s.x) * 180 / Math.PI - 90,
+            },
+            hovertemplate: `${(SKILL_LABELS[edge.source] || edge.source)} \u2192 ${(SKILL_LABELS[edge.target] || edge.target)}<br>Weight: ${edge.weight}<extra></extra>`,
+            showlegend: false,
+        });
+    });
+
+    // Nodes
+    const nodeX = nodes.map(n => positions[n.id].x);
+    const nodeY = nodes.map(n => positions[n.id].y);
+    const nodeColors = nodes.map(n => {
+        const score = n.score || 50;
+        if (n.is_bottleneck) return '#E74C3C';
+        if (score < 35) return '#f59e0b';
+        if (score < 55) return '#4A90D9';
+        return '#22c55e';
+    });
+    const nodeLabels = nodes.map(n => SKILL_LABELS[n.id] || n.id);
+    const nodeSizes = nodes.map(n => n.is_bottleneck ? 20 : 14);
+
+    traces.push({
+        type: 'scatter',
+        mode: 'markers+text',
+        x: nodeX,
+        y: nodeY,
+        marker: {
+            color: nodeColors,
+            size: nodeSizes,
+            line: { color: nodes.map(n => n.is_bottleneck ? '#E74C3C' : 'rgba(200,200,200,0.3)'), width: 2 },
+        },
+        text: nodeLabels,
+        textposition: nodes.map((_, i) => {
+            const angle = (2 * Math.PI * i / n) - Math.PI / 2;
+            // Position labels outside the circle
+            if (angle > -Math.PI / 4 && angle < Math.PI / 4) return 'top center';
+            if (angle >= Math.PI / 4 && angle < 3 * Math.PI / 4) return 'middle right';
+            if (angle >= 3 * Math.PI / 4 || angle < -3 * Math.PI / 4) return 'bottom center';
+            return 'middle left';
+        }),
+        textfont: { color: '#e4e4e7', size: 10 },
+        hovertemplate: nodes.map(n => {
+            const label = SKILL_LABELS[n.id] || n.id;
+            const bn = n.is_bottleneck ? ' (BOTTLENECK)' : '';
+            return `${label}: ${Math.round(n.score)}/100${bn}<extra></extra>`;
+        }),
+        showlegend: false,
+    });
+
+    const layout = {
+        ...PLOTLY_DARK,
+        margin: { t: 10, b: 10, l: 10, r: 10 },
+        height: 300,
+        xaxis: { visible: false, range: [-0.05, 1.05] },
+        yaxis: { visible: false, range: [-0.05, 1.05], scaleanchor: 'x' },
+        showlegend: false,
+    };
+
+    Plotly.newPlot(container, traces, layout, PLOTLY_CONFIG);
+}
+
+// =============================================================================
+// PROFILE PANEL — Profile Facts
+// =============================================================================
+
+function renderProfileFacts(profileFacts) {
+    if (!profileFacts) return;
+    const container = document.getElementById('facts-content');
+    if (!container) return;
+
+    const observed = profileFacts.observed || [];
+    const inferred = profileFacts.inferred || [];
+    const bayesInferences = profileFacts.bayes_inferences || [];
+
+    if (observed.length === 0 && inferred.length === 0 && bayesInferences.length === 0) {
+        container.innerHTML = '<p class="profile-empty">No facts extracted yet. They\'ll appear as we talk.</p>';
+        return;
+    }
+
+    let html = '';
+
+    if (observed.length > 0) {
+        html += '<div class="facts-section"><div class="facts-heading">Observed</div>';
+        observed.forEach(f => {
+            const cat = f.category || 'general';
+            const valenceClass = f.valence === 'negative' ? 'neg' : f.valence === 'positive' ? 'pos' : 'neu';
+            html += `<div class="fact-item ${valenceClass}">
+                <span class="fact-badge">${cat}</span>
+                <span class="fact-text">${f.content || f.text || ''}</span>
+            </div>`;
+        });
+        html += '</div>';
+    }
+
+    if (inferred.length > 0) {
+        html += '<div class="facts-section"><div class="facts-heading">Inferred</div>';
+        inferred.forEach(f => {
+            const cat = f.category || 'inferred';
+            html += `<div class="fact-item inferred">
+                <span class="fact-badge">${cat}</span>
+                <span class="fact-text">${f.content || f.text || ''}</span>
+            </div>`;
+        });
+        html += '</div>';
+    }
+
+    if (bayesInferences.length > 0) {
+        html += '<div class="facts-section"><div class="facts-heading">Causal Inferences</div>';
+        bayesInferences.forEach(n => {
+            const prob = Math.round((n.probability || 0) * 100);
+            html += `<div class="fact-item causal">
+                <span class="fact-text">${n.content || ''}</span>
+                <div class="fact-prob-bar">
+                    <div class="fact-prob-fill" style="width: ${prob}%"></div>
+                    <span class="fact-prob-label">${prob}%</span>
+                </div>
+            </div>`;
+        });
+        html += '</div>';
+    }
+
+    container.innerHTML = html;
 }
 
 // =============================================================================

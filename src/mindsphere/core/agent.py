@@ -2712,6 +2712,96 @@ class CoachingAgent:
 
         return summary
 
+    def get_profile_data(self) -> Dict[str, Any]:
+        """Get detailed profile data for visualization panel."""
+        # Raw skill belief distributions (5-level probabilities)
+        skill_beliefs = {}
+        skill_scores = {}
+        for skill in SKILL_FACTORS:
+            if skill in self.beliefs:
+                skill_beliefs[skill] = self.beliefs[skill].tolist()
+                skill_scores[skill] = round(
+                    self.model.get_skill_score(self.beliefs[skill]), 1
+                )
+
+        # Emotional state from Circumplex POMDP
+        emotional_state = {
+            "valence_belief": self.emotion.belief_valence.tolist(),
+            "arousal_belief": self.emotion.belief_arousal.tolist(),
+        }
+        trajectory = self.emotion.get_emotional_trajectory()
+        if trajectory.get("current"):
+            emotional_state["current"] = trajectory["current"]
+        else:
+            current = self.emotion.get_current_emotion()
+            emotional_state["current"] = current.to_dict() if current else None
+        emotional_state["trajectory"] = trajectory.get("states", [])
+        emotional_state["avg_prediction_error"] = trajectory.get(
+            "avg_prediction_error", 0.0
+        )
+
+        # ToM user type dimensions + reliability
+        tom_profile = {
+            "dimensions": self.tom.get_user_type_summary(),
+            "reliability": round(self.tom.reliability, 3),
+        }
+
+        # Dependency graph: nodes (skills + scores + bottleneck flag) and edges
+        skill_belief_dict = {
+            k: v for k, v in self.beliefs.items() if k in SKILL_FACTORS
+        }
+        bottlenecks = self.dep_graph.find_bottlenecks(skill_belief_dict)
+        bottleneck_ids = {b["blocker"] for b in bottlenecks}
+        dependency_graph = {
+            "nodes": [
+                {
+                    "id": skill,
+                    "score": skill_scores.get(skill, 50),
+                    "is_bottleneck": skill in bottleneck_ids,
+                }
+                for skill in SKILL_FACTORS
+            ],
+            "edges": self.dep_graph.get_all_edges(),
+        }
+
+        # Profile facts from Bayesian network
+        profile_summary = self.profile.get_summary()
+        facts = profile_summary.get("facts", [])
+        bayes_net = profile_summary.get("bayes_net", {})
+        observed_facts = [f for f in facts if f.get("source") == "explicit"]
+        inferred_facts = [f for f in facts if f.get("source") != "explicit"]
+        # Also include Bayesian network inferred nodes
+        bn_nodes = bayes_net.get("nodes", [])
+        inferred_nodes = [
+            n for n in bn_nodes if not n.get("observed", True)
+        ]
+
+        profile_facts = {
+            "observed": observed_facts,
+            "inferred": inferred_facts,
+            "bayes_inferences": inferred_nodes,
+        }
+
+        # Score deltas: compare current vs previous snapshot
+        score_deltas = {}
+        if hasattr(self, "_prev_skill_scores") and self._prev_skill_scores:
+            for skill, score in skill_scores.items():
+                prev = self._prev_skill_scores.get(skill, score)
+                delta = round(score - prev, 1)
+                score_deltas[skill] = delta
+        # Store current scores for next comparison
+        self._prev_skill_scores = dict(skill_scores)
+
+        return {
+            "skill_beliefs": skill_beliefs,
+            "skill_scores": skill_scores,
+            "score_deltas": score_deltas,
+            "emotional_state": emotional_state,
+            "tom_profile": tom_profile,
+            "dependency_graph": dependency_graph,
+            "profile_facts": profile_facts,
+        }
+
     # -------------------------------------------------------------------------
     # HELPERS
     # -------------------------------------------------------------------------

@@ -56,12 +56,34 @@
                     <div id="counterfactual-display"></div>
                 </div>
 
-                <!-- Belief panel (collapsible) -->
-                <details id="belief-panel">
-                    <summary>Your Profile (live)</summary>
-                    <div id="belief-content"></div>
-                    <div id="tom-stats"></div>
-                </details>
+                <!-- Profile visualization panels -->
+                <div id="profile-panel" class="hidden">
+                    <details id="skill-distributions" open>
+                        <summary>Skill Beliefs</summary>
+                        <div id="skill-dist-chart"></div>
+                    </details>
+
+                    <details id="emotion-panel">
+                        <summary>Emotional State</summary>
+                        <div id="circumplex-chart"></div>
+                    </details>
+
+                    <details id="tom-panel">
+                        <summary>User Model (ToM)</summary>
+                        <div id="tom-chart"></div>
+                        <div id="tom-reliability"></div>
+                    </details>
+
+                    <details id="causal-panel">
+                        <summary>Causal Graph</summary>
+                        <div id="dependency-chart"></div>
+                    </details>
+
+                    <details id="facts-panel">
+                        <summary>What I Know About You</summary>
+                        <div id="facts-content"></div>
+                    </details>
+                </div>
             </div>
         </div>
 
